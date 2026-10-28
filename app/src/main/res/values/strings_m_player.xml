@@ -18,4 +18,13 @@
 
     <!-- 右下角簇的第四颗：把弹幕/比例/内核/解码/片头片尾收进去，不各占一颗常驻按钮 -->
     <string name="m_player_more">更多</string>
+
+    <!-- 底栏「下一集」：只在有下一集时可点，末集置灰 -->
+    <string name="m_player_next_episode">下一集</string>
+
+    <!-- 画面右侧竖排的截图按钮与它的三条回执 -->
+    <string name="m_player_screenshot">截图</string>
+    <string name="m_player_shot_saved">截图已保存到相册</string>
+    <string name="m_player_shot_failed">没截到画面，等画面出来后再试</string>
+    <string name="m_player_shot_need_q">截图需要 Android 10 及以上系统</string>
 </resources>

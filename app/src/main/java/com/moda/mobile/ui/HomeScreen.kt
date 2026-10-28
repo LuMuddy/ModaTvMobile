@@ -78,8 +78,14 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
-/** 手机竖屏 2 列。数字只在这里出现一次，网格列数与「继续观看」的尾段排布都读它 */
-private const val GRID_COLUMNS = 2
+/**
+ * 手机竖屏 3 列。数字只在这里出现一次，网格列数与「继续观看」的尾段排布都读它。
+ *
+ * 3 列是用户按"一页能看几部"定的（2 列一屏只有 4 部）。360dp 竖屏下每格约 101dp、
+ * 卡片内文宽约 81dp：标题 15sp 两行放得下约 10 个汉字（超出省略），
+ * 副标题 12sp 单行放得下约 6 个汉字——只会省略，不会换行成一个字一行。
+ */
+private const val GRID_COLUMNS = 3
 
 /**
  * 首页「继续观看」最多显示多少条。

@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -29,6 +28,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -56,11 +56,9 @@ import com.moda.mobile.model.Episode
 import com.moda.mobile.model.SeriesDetail
 import com.moda.mobile.model.Tier
 import com.moda.mobile.ui.components.ActionButton
-import com.moda.mobile.ui.components.Badge
 import com.moda.mobile.ui.components.EmptyState
 import com.moda.mobile.ui.components.ErrorState
 import com.moda.mobile.ui.components.LoadingState
-import com.moda.mobile.ui.components.RemoteImage
 import com.moda.mobile.ui.components.SectionTitle
 import com.moda.mobile.ui.components.appErrorText
 import com.moda.mobile.ui.detail.DetailPreviewPlayer
@@ -88,7 +86,7 @@ private const val DESC_COLLAPSED_LINES = 3
  */
 private val EpisodeCellHeight = 40.dp
 
-/** 选集格子在整个网格里的起始下标：播放器外观区、页头、区块标题各占一个满宽 item */
+/** 选集格子在整个网格里的起始下标：小屏播放器、页头、区块标题各占一个满宽 item */
 private const val EPISODE_ITEM_START = 3
 
 /**
@@ -104,41 +102,30 @@ private const val EPISODE_VISIBLE_WITHOUT_SCROLL = 12
 /** 预告角标的靛蓝，与 components/Cards.kt 里 EpisodeChip 用的是同一个色值 */
 private val TrailerIndigo = Color(0xFF5C6BC0)
 
-/** VIP 角标的金，与页头 VIP 标同色 */
+/** VIP 角标的金：选集格子右下角那颗「VIP」用它（页头那颗同色角标已经删掉） */
 private val VipGold = Color(0xFFE0A32E)
 
 /**
- * 断点时间格式化：不足 1 小时 mm:ss（补零），≥1 小时 h:mm:ss（小时不补零），0 返回空串。
+ * 剧集详情：顶部小屏播放器 + 海报/标题/收藏/可展开简介 + 多行选集网格。
  *
- * 为什么 0 返回空串而不是 "00:00"：调用方用空串表示「这集没有断点，别显示时间」，
- * 显示 "00:00" 会被读成「看到了开头」，和「没看过」是两件事。
- */
-private fun formatProgress(ms: Long): String {
-    if (ms <= 0L) return ""
-    val totalSeconds = ms / 1000L
-    val hours = totalSeconds / 3600L
-    val minutes = (totalSeconds % 3600L) / 60L
-    val seconds = totalSeconds % 60L
-    fun pad(v: Long) = if (v < 10L) "0$v" else "$v"
-    return if (hours > 0L) "$hours:${pad(minutes)}:${pad(seconds)}" else "${pad(minutes)}:${pad(seconds)}"
-}
-
-/**
- * 剧集详情：竖版海报头图 + 标题/元信息 + 主按钮 + 可展开的简介 + 多行选集网格。
+ * 顶部那块**真的能播**（[DetailPreviewPlayer]）：进页面就播续播集（没有历史就第 1 集），
+ * 可播放/暂停、纵滑调亮度与音量、投屏、进全屏。它就是「两种播放形态」里的小屏形态，
+ * 与全屏播放页各自有一条投屏入口。点集号**不**切小屏的片源——那只意味着"去全屏看这一集"。
  *
  * 与 TV 端的结构差别只有一处，但它是本质的：**选集从单行横轨改成多行网格**。
  * 手机上没有遥控器的左右键，横轨末端的集数要么靠连续滑动才够得着，
  * 要么用户根本不知道后面还有；网格上下滑一次能看过几十集。
- * 因此整页就是一个 LazyVerticalGrid（**6 列**），顶部播放器外观区、页头与区块标题各用满宽 span 占一行：
+ * 因此整页就是一个 LazyVerticalGrid（**6 列**），小屏播放器、页头与区块标题各用满宽 span 占一行：
  * 页头走得跟普通列表一样，而选集区落成 6 列密集排法（每格 40dp、只写集号），
  * 一屏能扫到五行以上集号。不用「LazyColumn 套 LazyVerticalGrid」，
  * 同方向嵌套滚动在触摸端会抢手势——这也是选集没法做成独立小网格的原因。
  *
+ * 地址由 VM 装（[onLoadPreview] → MainViewModel.loadDetailPreview），本页只在进页面时装一次、
+ * 离开时清掉。**不在这里写历史、不判完成**：进度的写者只有全屏播放页。
+ *
  * [onTierSelect] / [selectedTier] 是跨任务签名的一部分（契约 §5）。
  * 详情页仍然**不摆档位选择器**：切清晰度只发生在播放页的底部面板里，
  * 摆一排档位会在进播放器前就让人以为"这里选错了"，而它并不决定起播档位。
- * 但 [selectedTier] 有值时会把档位名写进顶部「播放器外观」区的左下角——
- * 那是「你现在看的是这一档」的陈述，不是一个可点的选项。
  */
 @Composable
 fun DetailScreen(
@@ -153,11 +140,20 @@ fun DetailScreen(
     description: String = "",
     onRetry: (() -> Unit)? = null,
     isFavorite: Boolean = false,
-    /** 历史落点：这部剧看过的话，主按钮写成「继续播放 mm:ss」、选集高亮那一格 */
+    /** 历史落点：这部剧看过的话，小屏从那一集起播、选集高亮那一格 */
     resume: DetailResume? = null,
     /** 这部剧已看完的集号集合，用于选集卡右上角的绿色勾标 */
     completedIndexes: Set<Int> = emptySet(),
     onToggleFavorite: () -> Unit = {},
+    /** 顶部小屏播放器要播的地址（VM 的 detailPreview）；null = 还没装好 */
+    preview: DetailPreview? = null,
+    previewLoading: Boolean = false,
+    /** 装地址失败：只影响顶部那一格，选集与收藏照常可用 */
+    previewError: AppError? = null,
+    /** 进页面装一次，参数是续播集下标（没有历史时是 0） */
+    onLoadPreview: (Int) -> Unit = {},
+    /** 离开页面清掉；引擎与投屏由 [DetailPreviewPlayer] 自己的 onDispose 收尾 */
+    onClearPreview: () -> Unit = {},
 ) {
     val episodes = detail?.episodes.orEmpty()
 
@@ -178,35 +174,52 @@ fun DetailScreen(
         watched?.episodeIndex?.takeIf { it in episodes.indices } ?: -1
     }
 
-    // 「继续播放 mm:ss」的判定必须**只认 vid 命中**，不能退回下标：
-    // positionMs 与 vid/episodeIndex 出自同一条历史记录，只对那一集有意义。
-    // 按下标匹配的话，集数表重排后 A 集的断点会被画到 B 集上，
-    // 用户点下去 resumePosition 又不会真的跳过去——表现就是「每集都显示同一串时间，点了却不续播」。
-    val continueIndex = watchedByVid
-    val continueEpisode = episodes.getOrNull(continueIndex)
-    // 该集已经看完时不显示断点：看完的集从"还剩多少"这个语义上已经没有续播意义
-    val continueMs = if (continueEpisode != null && continueIndex !in completedIndexes) {
-        watched?.positionMs ?: 0L
-    } else {
-        0L
-    }
-    val continueProgress = formatProgress(continueMs)
-    val hasResume = continueEpisode != null && continueProgress.isNotEmpty()
+    // 续播集就是 [resumeIndex]（vid 命中优先、下标兜底，见上）：小屏从这一集起播。
+    // 刻意不读 positionMs——详情页不写历史，也不续播到断点，起播位置恒为 0。
 
     // 用户自己点过某一集之后，迟到的历史不许再把高亮挪走
+    // （高亮只影响选集格与副标题；小屏的片源只认 previewIndex，见下）
     var userTouched by remember(detail?.cid) { mutableStateOf(false) }
     var currentIndex by remember(detail?.cid) { mutableIntStateOf(resumeIndex.coerceAtLeast(0)) }
     LaunchedEffect(detail?.cid, resume?.loaded, resumeIndex) {
         if (!userTouched && resume?.loaded == true && resumeIndex >= 0) currentIndex = resumeIndex
     }
 
-    /** 网格上方的副标题、页头 VIP 标都只看「当前这一集」 */
+    /** 网格上方的副标题只看「选集高亮的那一集」 */
     val currentEpisode = episodes.getOrNull(currentIndex)
+
+    /**
+     * 顶部小屏在播第几集：**只认 VM 装好的那一集**，与选集高亮 [currentIndex] 刻意分开。
+     *
+     * 两个状态描述的是两件事：高亮 = "我最后点了哪一集"（点完就进全屏了），
+     * 小屏 = "这一页现在在放哪一集"。用户明确要求点集号不切小屏，所以两者本来就可能不同。
+     * address 还没到时先按续播集显示，标题行才不至于写"第 1 集"再跳一次。
+     */
+    val previewIndex = preview?.episodeIndex ?: resumeIndex.coerceAtLeast(0)
+
+    val loadPreviewNow by rememberUpdatedState(onLoadPreview)
+    val clearPreviewNow by rememberUpdatedState(onClearPreview)
+
+    // 进页面装一次地址。必须等历史落定（[DetailResume.loaded]）再决定装哪一集：
+    // 先装第 1 集、等历史到了再换第 5 集，小屏会先起播一句再从头缓冲一次。
+    var previewRequested by remember(detail?.cid) { mutableStateOf(false) }
+    LaunchedEffect(detail?.cid, resume?.loaded, resumeIndex, episodes.size) {
+        if (previewRequested || episodes.isEmpty()) return@LaunchedEffect
+        if (resume != null && !resume.loaded) return@LaunchedEffect
+        previewRequested = true
+        loadPreviewNow(resumeIndex.coerceAtLeast(0))
+    }
+
+    // 离开详情页：清掉预览状态。引擎 release 与停投在 DetailPreviewPlayer 自己的 onDispose 里，
+    // 这里只管 VM 那一份地址，否则下次进别的剧会先闪一帧上一部的片源。
+    DisposableEffect(detail?.cid) {
+        onDispose { clearPreviewNow() }
+    }
 
     val gridState = rememberLazyGridState()
     // 进入页面直接落到续播那一集：几百集的连载不滚的话，用户得自己往下滑几十屏才找得到自己看到哪。
-    // 但续播集本来就在首屏里时不滚：为了一个已经看得见的格子把页头（海报、「继续播放」主按钮）
-    // 顶出屏幕，是把主操作藏起来换一个没有收益的位移。
+    // 但续播集本来就在首屏里时不滚：为了一个已经看得见的格子把页头（海报、标题、收藏）
+    // 顶出屏幕，是把这块内容换一个没有收益的位移。
     // 只给下标、不给像素偏移：靠近首尾时 scrollToItem 自己贴边，写死偏移反而会在两端越界。
     // 下标夹取到 [0, 末集]：集数表换了/历史对不上时 resumeIndex 可能落在范围外，不夹会直接崩。
     LaunchedEffect(detail?.cid, resume?.loaded, resumeIndex) {
@@ -224,7 +237,7 @@ fun DetailScreen(
     fun isTrailer(ep: Episode) = trailerKeys.any { it.isNotBlank() && ep.label.contains(it) }
 
     Column(Modifier.fillMaxSize().background(ModaColors.Bg)) {
-        // 有内容时返回按钮在顶部「播放器外观」区的左上角（见 [DetailPlayerHero]）。
+        // 有内容时返回按钮在顶部小屏播放器的左上角（见 [DetailPreviewPlayer]）。
         // 加载中 / 失败 / 空态根本没有那块区域，返回条必须自己补上——
         // 否则那三种状态里屏幕上没有任何出口，只剩系统返回手势一条路。
         if (detail == null) {
@@ -255,7 +268,7 @@ fun DetailScreen(
                     onRetry = onRetry ?: onBack,
                 )
                 else -> LazyVerticalGrid(
-                    // 6 列：选集区就是这张网格（播放器外观区/页头/标题/底部提示都用满宽 span），
+                    // 6 列：选集区就是这张网格（小屏播放器/页头/标题/底部提示都用满宽 span），
                     // 所以列数是选集区的排法，不是整页的排版
                     columns = GridCells.Fixed(6),
                     state = gridState,
@@ -265,17 +278,22 @@ fun DetailScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
+                    // 顶部就是这一页的第一个满宽 item：进详情页先看到画面，而不是一张剧照
                     item(span = { GridItemSpan(maxLineSpan) }, key = "player") {
-                        DetailPlayerHero(
-                            detail = detail,
-                            currentEpisode = currentEpisode,
-                            tierLabel = selectedTier?.let { tierNameText(it.display) }.orEmpty(),
-                            playable = episodes.isNotEmpty(),
+                        DetailPreviewPlayer(
+                            title = detail.title.ifBlank { stringResource(R.string.detail_untitled) },
+                            preview = preview,
+                            loading = previewLoading,
+                            error = previewError,
+                            // -1 = 这部剧没有集数：播放器据此不写"第 N 集"
+                            episodeIndex = if (episodes.isEmpty()) -1 else previewIndex,
+                            // 重试就是让 VM 重装这一集的地址（不新造网络路径）
+                            onRetry = { loadPreviewNow(previewIndex) },
                             onBack = onBack,
-                            // 有断点从断点那一集起播，没断点从第 1 集起播，与页头主按钮同一条规则。
-                            // 不自己传 positionMs：断点由 VM 在 push 时查历史得出
-                            onPlay = {
-                                val target = episodes.getOrNull(continueIndex) ?: episodes.firstOrNull()
+                            // 全屏播"小屏正在播的这一集"：点这颗键的意图是"放大看清"，不是换集。
+                            // 没有集数时退回第一集；一集都没有就什么也不做（屏幕上已有空态说明）
+                            onEnterFullscreen = {
+                                val target = episodes.getOrNull(previewIndex) ?: episodes.firstOrNull()
                                 if (target != null) {
                                     userTouched = true
                                     onPlay(target)
@@ -284,20 +302,13 @@ fun DetailScreen(
                         )
                     }
 
-                    item(span = { GridItemSpan(maxLineSpan) }, key = "header") {
-                        DetailHeader(
-                            detail = detail,
+                    // 海报/片名/元信息/集号整块去掉：播放器左上角已经写着「片名 · 第 N 集」，
+                    // 再来一遍只是把选集往下推。这里只剩收藏（唯一入口）与可展开的剧情简介
+                    item(span = { GridItemSpan(maxLineSpan) }, key = "actions") {
+                        DetailActions(
+                            detailCid = detail.cid,
                             description = description,
-                            episodes = episodes,
-                            currentEpisode = currentEpisode,
-                            hasResume = hasResume,
-                            continueProgress = continueProgress,
-                            continueIndex = continueIndex,
                             isFavorite = isFavorite,
-                            onPlay = { ep ->
-                                userTouched = true
-                                onPlay(ep)
-                            },
                             onToggleFavorite = onToggleFavorite,
                         )
                     }
@@ -400,228 +411,25 @@ fun DetailScreen(
 }
 
 /**
- * 顶部「播放器外观」区：16:9 横版剧照 + 一层自下而上的深色渐变，**不内嵌播放**。
+ * 播放器下方的那一条：收藏按钮 + 可展开的剧情简介。
  *
- * 为什么不做内嵌预览：在详情页里放一个真的播放器，控制层（进度 / 清晰度 / 弹幕）
- * 要么整份复制一遍、要么一个都不给，两条路都不划算；而用户点这块区域的意图从来只有一个——
- * 进全屏播放。所以这里只是一张「播放器长什么样」的壳：中央一颗播放键、左下角这一屏在播什么，
- * 点哪儿都走同一个 [onPlay] 进既有的播放页。
+ * 竖版海报、片名、元信息（集数/分类/主演）、「第 N 集」全部不再画：播放器左上角已经写着
+ * 「片名 · 第 N 集」，这些是同一件事的第二遍，代价是首屏被它吃掉三分之一。
  *
- * [tierLabel] 为空表示用户还没选过档位：那一截整段不组合，不留「· 」这种空尾巴。
+ * 收藏**不能**跟着删：详情页是这个数据唯一的产生入口，没有它收藏页永远是空的。
+ * 简介也不能删：播放器里没有剧情简介，而这是用户决定要不要看下去的依据。
  */
 @Composable
-private fun DetailPlayerHero(
-    detail: SeriesDetail,
-    currentEpisode: Episode?,
-    tierLabel: String,
-    /** 没有可播的集时不画中间那颗键：点不动的按钮比没有按钮更像是坏了 */
-    playable: Boolean,
-    onBack: () -> Unit,
-    onPlay: () -> Unit,
-) {
-    // 横版剧照：detail.cover（eps 的 meta.pic 原图）优先；为空时按 vid 拼腾讯图床的横版剧照，
-    // 与 VideoItem.wideCover 是同一条地址规律。SeriesDetail 上没有竖版海报字段，
-    // 两条都取不到时 RemoteImage 自己落成文字色块——这一块永远不会是纯黑。
-    val heroCover = detail.cover.ifBlank {
-        currentEpisode?.cover?.takeIf { it.isNotBlank() }
-            ?: detail.episodes.firstOrNull()?.cover.orEmpty()
-    }
-    Box(
-        Modifier
-            .fillMaxWidth()
-            .aspectRatio(16f / 9f)
-            .clip(RoundedCornerShape(14.dp))
-            .background(ModaColors.SurfaceHigh)
-            // 整块都是进播放页的入口；左上角的返回按钮自己吃掉点击，不会顺带起播
-            .clickable(enabled = playable, onClick = onPlay),
-    ) {
-        RemoteImage(
-            url = heroCover,
-            title = detail.title,
-            preferHiRes = true,
-            modifier = Modifier.fillMaxSize(),
-            corner = 0.dp,
-        )
-        // 渐变兜住可读性：剧照下半部分常常是亮的，白字直接压上去会糊成一片
-        Box(
-            Modifier
-                .fillMaxSize()
-                .background(
-                    Brush.verticalGradient(
-                        0.0f to Color.Transparent,
-                        0.45f to Color(0x59000000),
-                        1.0f to Color(0xE6000000),
-                    ),
-                ),
-        )
-        Box(
-            Modifier
-                .align(Alignment.TopStart)
-                .padding(6.dp)
-                .background(Color(0x59000000), CircleShape),
-        ) {
-            // IconButton 默认 48dp，触控区已经过 44dp 线；这里只给图标垫一层半透明圆底，
-            // 免得返回箭头落在浅色剧照上读不出来
-            IconButton(onClick = onBack) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = stringResource(R.string.search_back),
-                    tint = Color.White,
-                )
-            }
-        }
-        if (playable) {
-            Box(
-                Modifier
-                    .align(Alignment.Center)
-                    .size(64.dp)
-                    .background(Color(0x73000000), CircleShape)
-                    .clickable(onClick = onPlay),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = Icons.Filled.PlayArrow,
-                    contentDescription = stringResource(R.string.detail_play),
-                    tint = Color.White,
-                    modifier = Modifier.size(38.dp),
-                )
-            }
-        }
-        Column(
-            Modifier
-                .align(Alignment.BottomStart)
-                .padding(start = 12.dp, end = 12.dp, bottom = 10.dp),
-        ) {
-            Text(
-                text = detail.title.ifBlank { stringResource(R.string.detail_untitled) },
-                style = ModaType.Heading,
-                color = Color.White,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            val episodeLabel = currentEpisode
-                ?.let { stringResource(R.string.core_episode_index, it.index + 1) }
-                .orEmpty()
-            val meta = listOf(episodeLabel, tierLabel).filter { it.isNotBlank() }.joinToString(" · ")
-            if (meta.isNotEmpty()) {
-                Spacer(Modifier.height(3.dp))
-                Text(
-                    text = meta,
-                    style = ModaType.Caption,
-                    color = Color.White.copy(alpha = 0.86f),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-    }
-}
-
-/**
- * 页头：海报 + 标题/元信息 + 主按钮 + 收藏 + 可展开的简介。
- *
- * 主按钮紧跟标题，是进详情页后第一个想按的东西；只有一集时它是整页唯一的播放入口
- * （下面不会再有选集段）。有断点时文案变成「继续播放 mm:ss」，与 TV 端同一条规则。
- */
-@Composable
-private fun DetailHeader(
-    detail: SeriesDetail,
+private fun DetailActions(
+    detailCid: String,
     description: String,
-    episodes: List<Episode>,
-    currentEpisode: Episode?,
-    hasResume: Boolean,
-    continueProgress: String,
-    continueIndex: Int,
     isFavorite: Boolean,
-    onPlay: (Episode) -> Unit,
     onToggleFavorite: () -> Unit,
 ) {
-    Column(Modifier.fillMaxWidth().padding(top = 8.dp)) {
-        Row(Modifier.fillMaxWidth()) {
-            RemoteImage(
-                url = detail.cover,
-                title = detail.title,
-                // 头图就是这一页最大的那张图，值得走一次 eps 原图（见 RemoteImage 的取舍说明）
-                preferHiRes = true,
-                modifier = Modifier.width(112.dp).aspectRatio(3f / 4f),
-                corner = 12.dp,
-            )
-            Spacer(Modifier.width(12.dp))
-            Column(Modifier.weight(1f)) {
-                Row(verticalAlignment = Alignment.Top) {
-                    Text(
-                        text = detail.title.ifBlank { stringResource(R.string.detail_untitled) },
-                        style = ModaType.Title,
-                        color = ModaColors.Text,
-                        maxLines = 2,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false),
-                    )
-                    if (currentEpisode?.isVip == true) {
-                        Spacer(Modifier.width(8.dp))
-                        Badge("VIP", color = VipGold)
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-                // 元信息：集数 · 分类 · 主演。三段都可能有缺失，逐段判空再拼，
-                // 不留下「 · · 」这种空分隔
-                val metaParts = ArrayList<String>(3)
-                if (episodes.isNotEmpty()) {
-                    metaParts.add(stringResource(R.string.detail_episode_count, episodes.size))
-                }
-                if (detail.category.isNotBlank()) metaParts.add(detail.category)
-                if (detail.actors.isNotEmpty()) metaParts.add(detail.actors.joinToString(" / "))
-                if (metaParts.isNotEmpty()) {
-                    Text(
-                        text = metaParts.joinToString(" · "),
-                        style = ModaType.Caption,
-                        color = ModaColors.TextDim,
-                        maxLines = 3,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-        }
-
-        Spacer(Modifier.height(14.dp))
-
+    // top = 4dp 是"补足"而不是"起点"：网格 item 之间本来就有 8dp 的 verticalArrangement，
+    // 加起来正好是设计要的 12dp，写 12dp 会变成 20dp
+    Column(Modifier.fillMaxWidth().padding(top = 4.dp)) {
         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            if (episodes.isNotEmpty()) {
-                Button(
-                    onClick = {
-                        // 有断点从断点那一集起播，没断点从第 1 集起播。
-                        // 不自己传 positionMs：断点由 VM 的 resumePosition 在 push 时查历史得出，
-                        // 这里塞一个快照反而会和真实历史打架
-                        val target = episodes.getOrNull(continueIndex) ?: episodes.first()
-                        onPlay(target)
-                    },
-                    modifier = Modifier.weight(1f).height(48.dp),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = ModaColors.Accent,
-                        contentColor = Color.White,
-                    ),
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.PlayArrow,
-                        contentDescription = null,
-                        modifier = Modifier.size(22.dp),
-                        tint = Color.White,
-                    )
-                    Spacer(Modifier.width(8.dp))
-                    Text(
-                        text = if (hasResume) {
-                            stringResource(R.string.detail_continue_play, continueProgress)
-                        } else {
-                            stringResource(R.string.detail_play)
-                        },
-                        style = ModaType.Heading,
-                        color = Color.White,
-                        maxLines = 1,
-                    )
-                }
-                Spacer(Modifier.width(10.dp))
-            }
             // 收藏是这个数据唯一的产生入口：没有它收藏页永远是空的。
             // 返回交给屏幕上方的返回条与系统返回手势，这里不再摆第二个返回按钮
             OutlinedButton(
@@ -659,7 +467,7 @@ private fun DetailHeader(
 
         if (description.isNotBlank()) {
             Spacer(Modifier.height(14.dp))
-            DescriptionBlock(detailCid = detail.cid, description = description)
+            DescriptionBlock(detailCid = detailCid, description = description)
         }
     }
 }

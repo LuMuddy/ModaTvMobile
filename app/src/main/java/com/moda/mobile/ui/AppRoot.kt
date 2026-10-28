@@ -5,6 +5,10 @@ import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.annotation.StringRes
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
@@ -170,6 +174,14 @@ private const val HOME_DOUBLE_TAP_MS = 400L
 private val NAV_BAR_CONTENT_HEIGHT = 80.dp
 
 /**
+ * 底栏显隐的动画时长（高度收放与滑出/淡出共用这一个值）。
+ *
+ * 两处必须同源：它们是同一件事的两个侧面，长短不一就会出现「空间已经收完、底栏还悬在半空」，
+ * 看上去像被一刀裁掉。
+ */
+private const val NAV_BAR_ANIM_MS = 220
+
+/**
  * 已授权后的正常界面：路由栈在 MainViewModel 里，这里只按栈顶渲染。
  *
  * 手机端与 TV 端最大的差别在**壳**：底部三格导航承载一级页（首页 / 收藏 / 设置），
@@ -268,13 +280,25 @@ private fun AuthorizedContent(vm: MainViewModel) {
     // 可以把底栏叫回来，不归位就会停在一条永远不再出现的底栏上。
     LaunchedEffect(rootTab) { navBarVisible = true }
 
-    // 底栏占位高度 = M3 NavigationBar 的固定内容高度 + 它自己吃的系统栏 inset。
-    // NavigationBar 内部是 windowInsetsPadding(windowInsets).height(80dp)，所以总高恰为
-    // 「inset + 80dp」；inset 那一份从同一处 NavigationBarDefaults.windowInsets 现算，
-    // 手势条与三键导航共用一套式子，不必各写一个尺寸（MainActivity 开了 edge-to-edge，
-    // 这份 inset 是真的存在的，不能当成 0）。
-    val navBarHeight = NAV_BAR_CONTENT_HEIGHT +
-        NavigationBarDefaults.windowInsets.asPaddingValues().calculateBottomPadding()
+    // 底栏两截高度：
+    // - navBarInset：它自己吃的系统栏 inset（NavigationBar 内部是
+    //   windowInsetsPadding(windowInsets).height(80dp)，所以总高恰为「inset + 80dp」）。
+    //   从同一处 NavigationBarDefaults.windowInsets 现算，手势条与三键导航共用一套式子；
+    //   MainActivity 开了 edge-to-edge，这份 inset 非零，不能当成 0。
+    // - navBarHeight：可见时的总高。
+    val navBarInset = NavigationBarDefaults.windowInsets.asPaddingValues().calculateBottomPadding()
+    val navBarHeight = NAV_BAR_CONTENT_HEIGHT + navBarInset
+
+    // 占位高度跟着可见性**平滑收放**：既不是恒定，也不是跳变。
+    // Scaffold 的 innerPadding 由 bottomBar 的实际高度驱动，所以内容会跟着这一截一起内扩/回缩——
+    // 底栏滑出后不会在底下留一条 80dp 的黑带，最后一行的下方只剩安全区。
+    // 收回的终点取 navBarInset 而不是 0.dp：inset 那一截是手势条/三键导航的安全区，
+    // 收成 0 会把最后一行内容压在系统手势区底下（那不是"空"，但是点不到/被手势抢走）。
+    val reserve by animateDpAsState(
+        targetValue = if (navBarVisible) navBarHeight else navBarInset,
+        animationSpec = tween(NAV_BAR_ANIM_MS),
+        label = "nav-bar-reserve",
+    )
 
     Box(Modifier.fillMaxSize().background(ModaColors.Bg)) {
         if (rootTab != null) {
@@ -294,18 +318,26 @@ private fun AuthorizedContent(vm: MainViewModel) {
                 },
                 // 只有一级页有底栏；Scaffold 的 innerPadding 顺便把状态栏/导航栏让开
                 bottomBar = {
-                    // 占位与动画分离：外面这个盒子高度**恒定**，里面才是会位移的底栏。
-                    // Scaffold 的 innerPadding 由盒子高度算出来——盒子一旦跟着动画消失，
-                    // innerPadding 就变，整页内容会上下跳一次。所以隐藏时内容是"空出一块"，
-                    // 底栏只滑到屏幕外，绝不向上侵占内容区。
-                    Box(Modifier.fillMaxWidth().height(navBarHeight)) {
+                    // 占位盒高度 = reserve（可见 = 80dp + inset，隐藏 = 只剩 inset，中间是 220ms 的收放）。
+                    // Scaffold 的 innerPadding 由这个盒子的实际高度驱动：内容随收放平滑内扩，
+                    // 底栏滑出后不留黑带；恢复时内容平滑回到原位。全程不需要手动加 padding。
+                    Box(Modifier.fillMaxWidth().height(reserve)) {
                         AnimatedVisibility(
                             visible = navBarVisible,
                             modifier = Modifier.align(Alignment.BottomCenter),
-                            // 只做位移。enter/exit 的默认方向是"从上方掉下来 / 往上收起"，
-                            // 那是抽屉的方向；底栏该从屏幕下缘滑出、滑回下缘，两头都给 +it。
-                            enter = slideInVertically(initialOffsetY = { it }),
-                            exit = slideOutVertically(targetOffsetY = { it }),
+                            // 与高度收放**同一时长（220ms）+ 淡入淡出**：空间收到底的那一刻，
+                            // 底栏也必须正好滑走并淡掉；只做位移而不同步时长就会变成
+                            // 「底栏还悬在半空、空间已经归零」——看起来像被一刀裁掉。
+                            // 方向一律 +it：默认是从上方掉下来 / 往上收起（抽屉方向），
+                            // 底栏该走屏幕下缘。
+                            enter = slideInVertically(
+                                animationSpec = tween(NAV_BAR_ANIM_MS),
+                                initialOffsetY = { it },
+                            ) + fadeIn(animationSpec = tween(NAV_BAR_ANIM_MS)),
+                            exit = slideOutVertically(
+                                animationSpec = tween(NAV_BAR_ANIM_MS),
+                                targetOffsetY = { it },
+                            ) + fadeOut(animationSpec = tween(NAV_BAR_ANIM_MS)),
                         ) {
                             // 收藏 / 设置：单击即切页。首页：单击只回首页，双击才整页刷新
                             // （refreshHome 与工具栏刷新按钮同一条通路，19 个 tab 一起拉）。
@@ -780,6 +812,16 @@ private fun DetailRoute(vm: MainViewModel, dest: Dest.Detail) {
                 ),
             )
         },
+        // ---- 顶部小屏播放器（详情页自带的那块「真的能播」的画面）----
+        // 这五个实参是它的**唯一数据入口**：不传的话 preview 恒为 null，
+        // 小屏就是一格黑屏、连 loading 与错误文案都没有（真机上表现为"详情页顶部死的"）。
+        // 地址由 VM 装：进页面装一次续播集（onLoadPreview 的入参是集下标，不是 cid），
+        // 离开页面清掉（引擎 release 与停投在 DetailPreviewPlayer 的 onDispose 里）。
+        preview = vm.detailPreview,
+        previewLoading = vm.detailPreviewLoading,
+        previewError = vm.detailPreviewError,
+        onLoadPreview = vm::loadDetailPreview,
+        onClearPreview = vm::clearDetailPreview,
     )
 }
 

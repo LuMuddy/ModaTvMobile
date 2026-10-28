@@ -1,11 +1,20 @@
 package com.moda.mobile.ui
 
+import android.content.ContentValues
 import android.content.Context
 import android.content.pm.ActivityInfo
+import android.graphics.Bitmap
 import android.media.AudioManager
+import android.os.Build
+import android.os.Environment
+import android.os.Handler
+import android.os.Looper
+import android.provider.MediaStore
 import android.util.Log
+import android.view.PixelCopy
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.view.TextureView
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
@@ -39,6 +48,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BrightnessMedium
 import androidx.compose.material.icons.filled.LockOpen
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -112,6 +122,7 @@ import com.moda.mobile.ui.player.PlayerEngine
 import com.moda.mobile.ui.player.PlayerEngines
 import com.moda.mobile.ui.player.PlayerErrorPane
 import com.moda.mobile.ui.player.PlayerPanel
+import com.moda.mobile.ui.player.PlayerSideAction
 import com.moda.mobile.ui.player.QualitySheet
 import com.moda.mobile.ui.player.SpeedSheet
 import com.moda.mobile.ui.player.findActivity
@@ -124,6 +135,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 控制层无操作自动隐藏。TV 端是 5 秒，手机端取 3 秒：
@@ -145,6 +157,9 @@ private const val BufferingShowDelayMs = 400L
 private const val SeekHintMs = 900L
 private const val LevelHintMs = 800L
 private const val LockHintMs = 2_500L
+
+/** 截图回执（成功/失败）在屏上的存活时间：与锁屏提示同一个节奏 */
+private const val ShotHintMs = 2_500L
 
 /**
  * 「这一集以前播过」的判定阈值，与 TV 端同一个数。
@@ -182,6 +197,20 @@ private fun coreKeyOf(core: PlayerCore): String = when (core) {
 private enum class LevelKind { Brightness, Volume }
 
 /**
+ * 截图要抓的那一层画面。
+ *
+ * 画面到底落在哪种 View 上由内核决定（IJK = 裸 SurfaceView，Exo = PlayerView 内部的
+ * SurfaceView 或 TextureView），截图那一侧不该知道这件事，所以由 [VideoSurface] 创建 View 时
+ * 把实例填进来，点击时再取。用普通持有对象而不是 State：它只在点击那一刻被读一次，
+ * 写成 State 反而会让每次重组多一轮不可见的状态写入。
+ */
+private class CaptureSource {
+    // 填/读分别发生在 View 创建（主线程）与点击（主线程），@Volatile 只为让语义显式
+    @Volatile var surfaceView: SurfaceView? = null
+    @Volatile var textureView: TextureView? = null
+}
+
+/**
  * 视频渲染面（与 TV 端 VideoSurface 同一份实现，只去掉焦点相关的属性）。
  *  · Exo：画面挂在 PlayerView 上，必须绑定具体的 ExoPlayer 实例；
  *  · IJK：画面直接渲染到 SurfaceHolder，用裸 SurfaceView + attachSurface(holder)。
@@ -191,12 +220,15 @@ private fun VideoSurface(
     engine: PlayerEngine,
     core: PlayerCore,
     resizeMode: Int,
+    capture: CaptureSource,
     modifier: Modifier = Modifier,
 ) {
     when (core) {
         PlayerCore.Ijk -> AndroidView(
             factory = { ctx ->
                 SurfaceView(ctx).apply {
+                    // 截图源：IJK 的画面就是直接画在这个 Surface 上的
+                    capture.surfaceView = this
                     holder.addCallback(object : SurfaceHolder.Callback {
                         override fun surfaceCreated(h: SurfaceHolder) {
                             engine.attachSurface(h)
@@ -225,11 +257,111 @@ private fun VideoSurface(
             update = {
                 it.player = exoPlayerOf(engine)
                 it.resizeMode = resizeMode
+                // 截图源：PlayerView 内部可能是 SurfaceView 也可能是 TextureView（surface_type），
+                // 两种都记下来——截图时按拿到的那一种走对应的拷贝方式
+                when (val view = it.videoSurfaceView) {
+                    is SurfaceView -> capture.surfaceView = view
+                    is TextureView -> capture.textureView = view
+                    else -> Unit
+                }
             },
-            onRelease = { it.player = null },
+            onRelease = {
+                it.player = null
+                capture.surfaceView = null
+                capture.textureView = null
+            },
             modifier = modifier,
         )
     }
+}
+
+/**
+ * 抓一帧当前画面。
+ *
+ * 用 PixelCopy 而不是截 Activity 全屏：PixelCopy 拷的是播放器正在渲染的那层 Surface，
+ * 抓到的就是**视频帧本身**，控制层、弹幕、进度条都不会混进来。
+ * 拿不到帧就返回 null 而不是抛：没有 View（还没 attach）、还没出首帧
+ * （ERROR_SOURCE_NO_DATA）、安全解码输出（DRM）都是这样——调用方只要一条「没截到」的回执。
+ */
+private fun captureFrame(source: CaptureSource, onResult: (Bitmap?) -> Unit) {
+    val handler = Handler(Looper.getMainLooper())
+    try {
+        val surfaceView = source.surfaceView
+        if (surfaceView != null && surfaceView.width > 0 && surfaceView.height > 0) {
+            val frame = Bitmap.createBitmap(
+                surfaceView.width,
+                surfaceView.height,
+                Bitmap.Config.ARGB_8888,
+            )
+            PixelCopy.request(
+                surfaceView,
+                frame,
+                { result ->
+                    // 回调在主线程：成功就把这张位图交出去，失败当场回收，不留垃圾
+                    if (result == PixelCopy.SUCCESS) {
+                        onResult(frame)
+                    } else {
+                        frame.recycle()
+                        onResult(null)
+                    }
+                },
+                handler,
+            )
+            return
+        }
+        // Exo 配 surface_type=texture_view 时才走这条：内容本来就在内存里，不用 PixelCopy
+        val textureView = source.textureView
+        if (textureView != null && textureView.isAvailable) {
+            onResult(textureView.bitmap)
+            return
+        }
+    } catch (t: Throwable) {
+        Log.w("PlayerScreen", "截图抓帧失败：" + t.message)
+    }
+    onResult(null)
+}
+
+/**
+ * 把一帧写进系统相册的 Pictures/ModaTv。
+ *
+ * 只从 API 29 起调用：Q 起往自己的 MediaStore 记录里写不需要任何权限；Q 以下必须
+ * 先拿 WRITE_EXTERNAL_STORAGE，而播放页明确不申请运行时权限，所以那条路不开
+ * （低版本按钮置灰并给一句原因，见 PlayerScreen 里的 takeScreenshot）。
+ * 返回 Boolean 而不是抛异常：截图失败不该把播放页带进错误态。
+ */
+private fun saveShotToGallery(context: Context, bitmap: Bitmap): Boolean = try {
+    val resolver = context.contentResolver
+    val values = ContentValues().apply {
+        // 文件名只要求唯一，时间戳就够；不起中文名，免得各机型对文件名的清洗规则不一样
+        put(MediaStore.Images.Media.DISPLAY_NAME, "ModaTv_" + System.currentTimeMillis() + ".jpg")
+        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+        put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/ModaTv")
+        // pending：写完才让它出现在相册里，否则用户可能读到半张图
+        put(MediaStore.Images.Media.IS_PENDING, 1)
+    }
+    val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+    if (uri == null) {
+        false
+    } else {
+        val written = resolver.openOutputStream(uri)?.use { out ->
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 95, out)
+        } == true
+        if (written) {
+            resolver.update(
+                uri,
+                ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) },
+                null,
+                null,
+            )
+        } else {
+            // 写失败就把这条空记录删掉，别在相册里留一个点不开的条目
+            resolver.delete(uri, null, null)
+        }
+        written
+    }
+} catch (t: Throwable) {
+    Log.w("PlayerScreen", "截图落库失败：" + t.message)
+    false
 }
 
 /** 双击快退/快进的居中反馈：一个方向箭头 + 累计跳转量（照搬 TV 端 SeekHint 的形态） */
@@ -418,6 +550,13 @@ fun PlayerScreen(
     // 同一时刻只有一个面板（TV 端 five-boolean 互斥表的触屏等价物）
     var panel by remember { mutableStateOf<PlayerPanel?>(null) }
 
+    // —— 截图 ——
+    // 画面落在哪种 View 上由 VideoSurface 创建时填进来，点击那一刻才读
+    val captureSource = remember { CaptureSource() }
+    // 截图回执：0 = 不显示；非 0 = 要显示的文案资源键（成功 / 没截到 / 系统版本不够）
+    var shotHintRes by remember { mutableIntStateOf(0) }
+    var shotHintTick by remember { mutableIntStateOf(0) }
+
     // —— 投屏 ——
     // casting 非空 = 正在投到哪台电视；投屏期间本地引擎保持暂停
     var casting by remember { mutableStateOf<CastDevice?>(null) }
@@ -515,6 +654,15 @@ fun PlayerScreen(
     val initialStartMs = remember(cid, episodeLabel) { startPositionMs }
     val hasPlayedBefore = initialStartMs >= HasPlayedThresholdMs
 
+    /**
+     * 下一集：口径与 MainViewModel 的 nextEpisode 完全一致——[Episode.index] 是 0 基下标，
+     * 取 index == currentEpisodeIndex + 1 的那一集。找不到（末集，或集数表还没到手）就是 null，
+     * 按钮据此置灰；切集本身仍走 onSelectEpisode，这里不另造一套切集逻辑。
+     */
+    val nextEpisode = remember(episodes, currentEpisodeIndex) {
+        episodes.firstOrNull { it.index == currentEpisodeIndex + 1 }
+    }
+
     fun updateSettings(next: PlayerSettings) {
         val previous = settings
         settings = next
@@ -568,6 +716,40 @@ fun PlayerScreen(
                 ended = false
             }
             engine.play()
+        }
+    }
+
+    /**
+     * 截图：抓当前视频帧并落进系统相册（Pictures/ModaTv）。
+     *
+     * 只支持 API 29+：更低的版本要先拿 WRITE_EXTERNAL_STORAGE，而播放页不做运行时权限申请。
+     * 低版本按钮仍然可点，点下去给一句原因——置灰又点不动的按钮，用户问不出为什么不给用。
+     * 失败一律落成一条回执，不进播放页的错误态（截图失败跟「这一集播不了」不是一回事）。
+     */
+    fun takeScreenshot() {
+        touchControls()
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            shotHintRes = R.string.m_player_shot_need_q
+            shotHintTick++
+            return
+        }
+        captureFrame(captureSource) { frame ->
+            if (frame == null) {
+                shotHintRes = R.string.m_player_shot_failed
+                shotHintTick++
+            } else {
+                // 写盘放 IO 线程：一张 1080p JPEG 在主线程压完，控制层会明显卡一下
+                scope.launch {
+                    val saved = withContext(Dispatchers.IO) { saveShotToGallery(context, frame) }
+                    frame.recycle()
+                    shotHintRes = if (saved) {
+                        R.string.m_player_shot_saved
+                    } else {
+                        R.string.m_player_shot_failed
+                    }
+                    shotHintTick++
+                }
+            }
         }
     }
 
@@ -929,6 +1111,13 @@ fun PlayerScreen(
         lockHintVisible = false
     }
 
+    // 截图回执：连点两次只重新计时，不会叠出两条
+    LaunchedEffect(shotHintTick) {
+        if (shotHintTick == 0) return@LaunchedEffect
+        delay(ShotHintMs)
+        shotHintRes = 0
+    }
+
     BackHandler {
         when {
             // 分层退出：先关面板（投屏面板也在这一层），再关控制层，最后才离开播放页
@@ -963,6 +1152,7 @@ fun PlayerScreen(
                     engine = engine,
                     core = effectiveCore,
                     resizeMode = resizeMode,
+                    capture = captureSource,
                     modifier = if (fixedRatio != null) {
                         Modifier.fillMaxSize().aspectRatio(fixedRatio)
                     } else {
@@ -1153,6 +1343,25 @@ fun PlayerScreen(
             )
         }
 
+        // 截图回执：与播放页其余提示同一形态（半透明底 + 一行字），2.5 秒后自己收走。
+        // 故意不挂在控制层下面：点完截图控制层可能刚好自动收起，回执不能跟着一起消失。
+        if (shotHintRes != 0) {
+            Box(
+                Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 64.dp)
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(Color(0xCC000000))
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+            ) {
+                Text(
+                    text = stringResource(shotHintRes),
+                    style = ModaType.Caption,
+                    color = ModaColors.Text,
+                )
+            }
+        }
+
         // 7) 控制层：顶栏（返回 / 标题+集号 / 投屏 / 锁定）+ 底栏两行
         //    （播放暂停 / 时间 / 进度 / 弹幕开关 一行为一行，倍速 / 码率 / 选集 / 更多 右下角簇一行）。
         //    两段共用同一个 controlsVisible，同进同退；都排在手势层之后，所以按钮与进度条优先拿到触摸。
@@ -1184,6 +1393,9 @@ fun PlayerScreen(
                 durationMs = durationMs,
                 speedLabel = if (settings.speed != 1f) settings.speedLabel else null,
                 onTogglePlay = { togglePlay() },
+                // 下一集：只把点击交回既有通路（onSelectEpisode），末集 nextEpisode 为 null → 置灰
+                onNextEpisode = { nextEpisode?.let { episode -> onSelectEpisode(episode) } },
+                nextEpisodeEnabled = nextEpisode != null,
                 // 拖动中只更新预览，松手才真 seek（见 PlayerBottomBar 的注释）
                 onSeekPreview = { ms ->
                     dragSeeking = true
@@ -1202,6 +1414,23 @@ fun PlayerScreen(
                 onToggleDanmaku = { toggleDanmaku() },
                 modifier = Modifier.align(Alignment.BottomCenter),
             )
+            // 画面右侧竖排（优酷同一形态）：截图贴右边缘、垂直居中偏上，与控制层同进同退。
+            // 现有锁定入口在顶栏最右，竖排按钮压不到它「上面」，所以落位按可量化的那条
+            // ——右侧竖排 + 居中偏上（padding 把整颗往上抬半个偏移量的两倍）。
+            // 以后再往这一列加按钮就排在截图上/下，仍然只占一列，不往底栏四角挂图标。
+            Box(
+                Modifier
+                    .align(Alignment.CenterEnd)
+                    .padding(end = 12.dp, bottom = 96.dp),
+            ) {
+                PlayerSideAction(
+                    imageVector = Icons.Filled.PhotoCamera,
+                    contentDescription = stringResource(R.string.m_player_screenshot),
+                    // 29 以下写相册需要运行时权限，播放页不申请：置灰，点下去给原因
+                    enabled = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q,
+                    onClick = { takeScreenshot() },
+                )
+            }
         }
 
         // 8) 投屏中的状态提示：控制层收起、且没锁屏时仍然留在右上角。

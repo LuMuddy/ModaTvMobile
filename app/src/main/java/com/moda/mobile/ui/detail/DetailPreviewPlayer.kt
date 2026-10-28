@@ -6,8 +6,8 @@ import android.util.Log
 import android.view.WindowManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -52,7 +52,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
@@ -91,8 +93,15 @@ import kotlinx.coroutines.launch
 /** 四角图标的触控区：44dp 是触摸纪律的下限，再小就不是"按不到"而是"不敢按" */
 private val CornerTouchSize = 44.dp
 
-/** 手指移动超过这个距离才算拖动：小于它仍然判单击（播放/暂停） */
-private val DragSlopDp = 12f
+/**
+ * 手指移动超过这个距离才算纵滑，小于它仍然判单击（播放/暂停）。
+ *
+ * 6dp 刻意**低于**系统的 touchSlop（手机上约 8dp）：这一格嵌在详情页的 LazyVerticalGrid 里，
+ * 纵向手势同时被父亲的滚动容器盯着。child 在 Main 阶段先拿到事件，只有比滚动容器更早
+ * consume，纵滑才稳定落在"调亮度/音量"上，而不是把整页拖着走。
+ * 再大一点（全屏页用的是 12dp）在这里就会出现"手指拖了一半，页面先滚了"。
+ */
+private val DragSlop = 6.dp
 
 /** 纵滑满量程对应的屏高比例：0.6 屏高走完 0%→100%，单手够得着也不会一抖到底 */
 private const val LevelDragHeightRatio = 0.6f
@@ -146,7 +155,8 @@ fun DetailPreviewPlayer(
     val hlsUrl = preview?.hlsUrl
     // 直链先挂一次就静默换 HLS，并且记住这个选择：否则每次重组都会把失败的那条再试一遍
     var preferHls by remember(primaryUrl) { mutableStateOf(false) }
-    val playUrl = if (preferHls && !hlsUrl.isNullOrBlank()) hlsUrl else primaryUrl
+    // 显式标注 String：hlsUrl 是 String?，靠 isNullOrBlank 的契约做智能转换太脆
+    val playUrl: String = if (preferHls) hlsUrl ?: primaryUrl else primaryUrl
     // Exo 必须显式知道 MIME：m3u8 当 MP4 交给它必然失败。按后缀判（去掉 query 再判），
     // 这样"直链为空、地址本身就是 HLS"那条路也自动走对
     val useHls = playUrl.substringBefore('?').endsWith(".m3u8", ignoreCase = true)
@@ -220,6 +230,12 @@ fun DetailPreviewPlayer(
 
     fun setBufferingState(value: Boolean) {
         buffering = value
+    }
+
+    /** 单击画面的唯一动作：播放/暂停。错误态下没有画面，这一层压根不挂 */
+    fun togglePlay() {
+        val e = engine ?: return
+        if (e.isPlaying) e.pause() else e.play()
     }
 
     fun handleError(err: PlayerError) {
@@ -317,8 +333,14 @@ fun DetailPreviewPlayer(
         levelKind = null
     }
 
-    // 电视上要显示的名字：与全屏页同一拼法（标题 · 集号），也就是 metadata 里的 dc:title
-    val episodeLabel = stringResource(R.string.core_episode_index, episodeIndex + 1)
+    // 电视上要显示的名字：与全屏页同一拼法（标题 · 集号），也就是 metadata 里的 dc:title。
+    // episodeIndex < 0 表示这部剧根本没有集数（上游没返回）：那时整段集号不组合，
+    // 否则标题行会写出一句"第 0 集"
+    val episodeLabel = if (episodeIndex >= 0) {
+        stringResource(R.string.core_episode_index, episodeIndex + 1)
+    } else {
+        ""
+    }
     val castTitle = if (episodeLabel.isNotBlank()) title + " · " + episodeLabel else title
 
     /** 投屏的唯一出口。地址优先级：MP4 直链 → HLS，各试一次 */
@@ -332,8 +354,9 @@ fun DetailPreviewPlayer(
                 CastController.stop(previous)
                 casting = null
             }
+            val alt = hlsUrl?.takeIf { it.isNotBlank() }
             val ok = CastController.play(device, playUrl, castTitle) ||
-                (!hlsUrl.isNullOrBlank() && CastController.play(device, hlsUrl, castTitle))
+                (alt != null && CastController.play(device, alt, castTitle))
             if (ok) {
                 castResumeMs = e.positionMs
                 // 本地必须停下来：两端同时出声是最容易被当成 bug 的失败形态
@@ -411,8 +434,11 @@ fun DetailPreviewPlayer(
             else -> VideoSurface(engine = engine, modifier = Modifier.fillMaxSize())
         }
 
-        // 2) 手势层。排在四角按钮之前：Compose 的命中测试是"后画的先拿到"，
-        //    所以返回/投屏/倍速/全屏永远优先吃掉触摸，只有空白画面才落到这一层。
+        // 2) 手势层：**一段** pointerInput，单击与纵滑在同一段里分派。
+        //    不叠 detectTapGestures + detectDragGestures 两个检测器——它们互不知情，
+        //    谁先拿到同一次按下取决于注册顺序，正是 AGENTS.md 里禁止的「两套手势抢同一片区域」。
+        //    排在四角按钮之前：Compose 的命中测试是"后画的先拿到"，所以返回/投屏/倍速/全屏
+        //    永远优先吃掉触摸；awaitFirstDown 只接未被消费的按下，按在按钮上不会顺带暂停画面。
         //    单击 = 播放/暂停（小屏不做"单击显隐控制层"：角落按钮是常驻的）。
         //    只做纵滑，不做双击快进、不做横滑 seek——小屏和详情页的纵向滚动共用一块屏幕，
         //    再叠一条横向手势就会和"选下一集要往下滑"互相抢。
@@ -421,80 +447,89 @@ fun DetailPreviewPlayer(
                 Modifier
                     .fillMaxSize()
                     .pointerInput(engine) {
-                        detectTapGestures(
-                            onTap = {
-                                // 单击 = 播放/暂停。不在这里做错误态的判断：错误面板在不在
-                                // 由 interactive 决定，这一层只在有画面时才挂
-                                val e = engine
-                                if (e != null) {
-                                    if (e.isPlaying) e.pause() else e.play()
+                        val slop = DragSlop.toPx()
+                        awaitEachGesture {
+                            val down = awaitFirstDown()
+                            var accumY = 0f
+                            var dragging = false
+                            var kind: LevelKind? = null
+                            var level = 0f
+                            var lifted = false
+                            while (true) {
+                                val event = awaitPointerEvent()
+                                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                                if (change.changedToUpIgnoreConsumed()) {
+                                    lifted = true
+                                    break
                                 }
-                            },
-                        )
-                    }
-                    .pointerInput(engine) {
-                        var startX = 0f
-                        var accumY = 0f
-                        var active = false
-                        var kind: LevelKind? = null
-                        var level = 0f
-                        detectDragGestures(
-                            onDragStart = { offset ->
-                                // 判定必须用**手势起点**的 x：手指在拖动过程中越过中线，
-                                // 不该把"正在调音量"突然改成"正在调亮度"
-                                startX = offset.x
-                                accumY = 0f
-                                active = false
-                                kind = null
-                            },
-                            onDrag = { change, dragAmount ->
-                                change.consume()
-                                accumY += dragAmount.y
-                                if (!active && abs(accumY) > DragSlopDp.dp.toPx()) {
-                                    active = true
-                                    // 左半屏亮度、右半屏音量
-                                    kind = if (startX < size.width / 2f) LevelKind.Brightness else LevelKind.Volume
+                                if (!change.pressed) break
+                                accumY += change.positionChange().y
+                                if (!dragging) {
+                                    if (abs(accumY) <= slop) continue
+                                    dragging = true
+                                    // 判定用**手势起点**的 x（down.position），不是实时 x：
+                                    // 手指在拖动中越过中线，不该把"正在调音量"改成"正在调亮度"
+                                    kind = if (down.position.x < size.width / 2f) {
+                                        LevelKind.Brightness
+                                    } else {
+                                        LevelKind.Volume
+                                    }
                                     level = if (kind == LevelKind.Brightness) brightnessNow else volumeNow
                                     accumY = 0f
                                 }
-                                if (active) {
-                                    // 半屏高 ≈ 满量程：物理距离与 0..1 成正比，贴着底部也调得动
-                                    level = (level - accumY / (size.height * LevelDragHeightRatio)).coerceIn(0f, 1f)
-                                    accumY = 0f
-                                    val current = kind
-                                    if (current != null) {
-                                        levelKind = current
-                                        levelValue = level
-                                        if (current == LevelKind.Brightness) {
-                                            applyBrightness(level)
-                                        } else {
-                                            applyVolume(level)
-                                        }
+                                // 到这里这一句手势归拖动所有：consume 掉，别让详情页的纵向滚动
+                                // 同时把整页拖着走
+                                change.consume()
+                                // 0.6 屏高 ≈ 满量程：物理距离与 0..1 成正比，贴着底部也调得动
+                                level = (level - accumY / (size.height * LevelDragHeightRatio))
+                                    .coerceIn(0f, 1f)
+                                accumY = 0f
+                                val current = kind
+                                if (current != null) {
+                                    levelKind = current
+                                    levelValue = level
+                                    if (current == LevelKind.Brightness) {
+                                        applyBrightness(level)
+                                    } else {
+                                        applyVolume(level)
                                     }
                                 }
-                            },
-                            onDragEnd = { if (active) levelTick++ },
-                            onDragCancel = { if (active) levelTick++ },
-                        )
+                            }
+                            // 抬手时还没越过斜率 = 单击。手势被系统打断（来电/划走）不算单击，
+                            // 只有真的"抬起"才切播放——否则一次被打断的滑动会莫名其妙暂停画面
+                            if (dragging) levelTick++ else if (lifted) togglePlay()
+                        }
                     },
             )
         }
 
-        // 3) 左上角：只有返回一颗；返回下方一行小字「片名 · 第 N 集」，仅此一处文字
-        Column(Modifier.align(Alignment.TopStart).padding(6.dp)) {
+        // 3) 左上角：返回 + **同一行**的「片名 · 第 N 集」，整页仅此一处文字。
+        //    标题不另起一行：这一格只有 16:9（手机竖屏约 184dp 高），多占一行会把文字压向画面中央，
+        //    左上角也只剩下一个孤零零的返回键。
+        //    end = 108dp 是给右上角那两颗 44dp 图标留的位置（44+8+44 + 两侧 6dp 内边距），
+        //    标题只吃剩下的宽度：长片名在这里 ellipsis，不会钻到投屏/倍速图标底下。
+        Row(
+            Modifier
+                .align(Alignment.TopStart)
+                .padding(start = 4.dp, top = 8.dp, end = 108.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
             CornerIcon(
                 icon = Icons.AutoMirrored.Filled.ArrowBack,
                 description = stringResource(R.string.search_back),
                 onClick = onBack,
             )
-            Spacer(Modifier.height(2.dp))
+            // 8dp 是图标圆底与文字之间的呼吸位；再大标题就离开返回键的视线范围了
+            Spacer(Modifier.width(8.dp))
             Text(
                 text = listOf(title, episodeLabel).filter { it.isNotBlank() }.joinToString(" · "),
+                // 降一档：Caption（12sp）+ 主文字色。Heading/Body 在这块画面里会把标题顶成第二条字幕
                 style = ModaType.Caption,
-                color = Color.White.copy(alpha = 0.9f),
+                color = ModaColors.Text,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(horizontal = 6.dp).widthIn(max = 220.dp),
+                // fill = false：占"剩余宽度"但不强行撑满，短片名不会把这一行拉出一段空白
+                modifier = Modifier.weight(1f, fill = false),
             )
         }
 

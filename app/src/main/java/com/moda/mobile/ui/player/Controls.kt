@@ -31,7 +31,9 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.outlined.SubtitlesOff
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -54,6 +56,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
@@ -431,7 +434,7 @@ fun PlayerTopBar(
 
 /**
  * 底栏两行：
- *  第一行 = 播放/暂停 + 当前/总时长 + 进度 Slider（weight 1f）+ 弹幕快捷开关；
+ *  第一行 = 播放/暂停 + 下一集 + 当前/总时长 + 进度 Slider（weight 1f）+ 弹幕快捷开关；
  *  第二行 = 右下角簇：倍速 / 码率（清晰度）/ 选集 / 更多，整行右对齐、间隔 8dp。
  *
  * 两行各占一条高度，所以「进度条被挤」和「簇压住进度条末端」两件事都不会发生：
@@ -449,6 +452,8 @@ fun PlayerBottomBar(
     durationMs: Long,
     speedLabel: String?,
     onTogglePlay: () -> Unit,
+    onNextEpisode: () -> Unit,
+    nextEpisodeEnabled: Boolean,
     onSeekPreview: (Long) -> Unit,
     onSeekCommit: (Long) -> Unit,
     onOpenPanel: (PlayerPanel) -> Unit,
@@ -479,6 +484,27 @@ fun PlayerBottomBar(
                         imageVector = if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                         contentDescription = null,
                         tint = ModaColors.Text,
+                    )
+                }
+                // 下一集：就压在播放/暂停右边（优酷同一位置），时间文字之前。
+                // 没有下一集时**置灰不隐藏**：隐藏会让后面的时间与进度条整体左移，
+                // 每换一集位置都跳一下。切集本身没有第二套逻辑——这里只把点击交回调用方的
+                // onSelectEpisode，与选集面板走同一条通路。
+                Box(
+                    Modifier
+                        .size(SheetTitleHeight)
+                        .clip(CircleShape)
+                        .clickable(enabled = nextEpisodeEnabled, onClick = onNextEpisode),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.SkipNext,
+                        contentDescription = stringResource(R.string.m_player_next_episode),
+                        tint = if (nextEpisodeEnabled) {
+                            ModaColors.Text
+                        } else {
+                            ModaColors.TextDim.copy(alpha = 0.45f)
+                        },
                     )
                 }
                 Text(
@@ -566,6 +592,41 @@ private fun BottomActionChip(label: String, onClick: () -> Unit) {
         contentAlignment = Alignment.Center,
     ) {
         Text(label, style = ModaType.Body, color = ModaColors.Text, maxLines = 1)
+    }
+}
+
+/** 画面右侧竖排按钮的直径：与顶栏图标按钮同一档，44dp 触控区达标 */
+private val SideActionSize = 44.dp
+
+/**
+ * 画面右侧竖排（竖屏手机上贴右边缘）的一颗按钮，形态同优酷的侧栏：
+ * 44dp 圆形半透明底 + 居中图标。它不属于底栏两行，所以单独一个 composable——
+ * 底栏的行高与「四角不许出现孤悬图标」这两条既有规则都不受影响。
+ *
+ * [enabled] = false 时**置灰但仍可点**：点下去由调用方说明为什么用不了（例如系统版本不够），
+ * 比一颗点不动也问不出原因的按钮清楚——与清晰度面板把「不可用」写进标签同一个理由。
+ */
+@Composable
+fun PlayerSideAction(
+    imageVector: ImageVector,
+    contentDescription: String,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier
+            .size(SideActionSize)
+            .clip(CircleShape)
+            .background(Color(0x66000000))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Icon(
+            imageVector = imageVector,
+            contentDescription = contentDescription,
+            tint = if (enabled) Color.White else Color.White.copy(alpha = 0.4f),
+        )
     }
 }
 
