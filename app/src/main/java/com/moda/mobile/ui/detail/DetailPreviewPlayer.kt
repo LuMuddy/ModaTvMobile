@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -591,30 +592,52 @@ fun DetailPreviewPlayer(
             )
         }
 
-        // 3) 顶部控制带：整宽、贴卡片边缘、**无圆角无左右 margin**。
-        //    背景是自上而下收黑的渐变（0xCC000000 → 全透明）：不是一块浮在画面上的深色贴纸，
-        //    而是画面自己暗下去——片头黑底时看不出边界，正是"融进画面"。
-        //    唯一的不圆角来源是卡片自己的 clip(14dp)，所以两端会被圆角自然裁掉。
-        //    返回**常驻**（控件层收起时它是这一格唯一的出口）；投屏/倍速随控件层显隐，
-        //    但两者同一个 Row，带宽恒定——显隐时高度不跳。
-        Row(
+        // 3) 返回：**纯图标**，绝对定位在卡片左上角（start 12 / top 12，固定值）。
+        //    它刻意**不挂**在上面那条渐变 Row 里：那条带子的高度会随 CastStatusChip 出现/消失、
+        //    随控件层显隐变化，一旦共用布局，返回就会跟着上下跳——这是用户截图里"跳来跳去"的来源。
+        //    没有圆底、没有边框、没有背景块（"应该就是一个图标"）；
+        //    用一层 1dp 的暗色副本当很轻的投影，保证亮画面上还看得见，也不破坏纯图标的观感。
+        Box(
             Modifier
-                .fillMaxWidth()
-                .align(Alignment.TopCenter)
-                .background(
-                    Brush.verticalGradient(listOf(Color(0xCC000000), Color(0x00000000))),
-                )
-                .padding(horizontal = 12.dp, vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
+                .align(Alignment.TopStart)
+                .padding(start = 12.dp, top = 12.dp)
+                // 触控区仍 44dp；clip 只给水波纹一个形状，不画任何背景
+                .size(44.dp)
+                .clip(CircleShape)
+                .clickable(onClick = onBack),
+            contentAlignment = Alignment.Center,
         ) {
-            CornerIcon(
-                icon = Icons.AutoMirrored.Filled.ArrowBack,
-                description = stringResource(R.string.search_back),
-                onClick = onBack,
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = null,
+                tint = Color(0x59000000),
+                modifier = Modifier.size(26.dp).offset(y = 1.dp),
             )
-            Spacer(Modifier.weight(1f))
-            if (controlsVisible) {
+            Icon(
+                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                contentDescription = stringResource(R.string.search_back),
+                tint = ModaColors.Text,
+                modifier = Modifier.size(26.dp),
+            )
+        }
+
+        // 4) 顶部控制带：只承载右侧的投屏/倍速（返回已经独立在 3)），整宽、贴卡片边缘、
+        //    **无圆角无左右 margin**。背景自上而下收黑（0xCC000000 → 全透明）：
+        //    不是一块浮在画面上的深色贴纸，而是画面自己暗下去——片头黑底时看不出边界。
+        //    带子里没有任何常驻内容，所以它随控件层一起出现/消失，高度变化与返回无关。
+        //    top 也给 12dp：右侧两颗图标的顶边与返回按钮对齐，三者不会错开。
+        if (controlsVisible) {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.TopCenter)
+                    .background(
+                        Brush.verticalGradient(listOf(Color(0xCC000000), Color(0x00000000))),
+                    )
+                    .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 // 投屏中额外挂一条「正在投屏到 X」：投到电视之后手机是黑的，
                 // 不写出来用户没法确认自己投成功了没有
                 casting?.let { device ->
@@ -637,7 +660,7 @@ fun DetailPreviewPlayer(
             }
         }
 
-        // 4) 底部控制带：整宽、贴卡片边缘、无圆角无 margin（圆角只来自卡片 clip(14dp)），
+        // 5) 底部控制带：整宽、贴卡片边缘、无圆角无 margin（圆角只来自卡片 clip(14dp)），
         //    背景自下而上收黑（全透明 → 0xE6000000）。
         //    一行排完：播放/暂停 · 当前时间 · 进度条 · 总时长 · 全屏。
         //    全屏**并进这一行**而不是浮在画面里：它原本紧贴在进度条上方，两条虚线一样近，
@@ -728,7 +751,7 @@ fun DetailPreviewPlayer(
             }
         }
 
-        // 5) 缓冲指示：首帧还没出来时给一个细环，免得这一格看起来就是坏了
+        // 6) 缓冲指示：首帧还没出来时给一个细环，免得这一格看起来就是坏了
         if (interactive && buffering && !playing) {
             CircularProgressIndicator(
                 modifier = Modifier.align(Alignment.Center).size(22.dp),
@@ -737,12 +760,12 @@ fun DetailPreviewPlayer(
             )
         }
 
-        // 6) 纵滑指示：图标 + 百分比，松手 800ms 后收掉
+        // 7) 纵滑指示：图标 + 百分比，松手 800ms 后收掉
         levelKind?.let { kind ->
             LevelIndicator(kind = kind, value = levelValue, modifier = Modifier.fillMaxSize())
         }
 
-        // 7) 两块面板。PlayerSheet 用的是 ModalBottomSheet（挂在窗口上），
+        // 8) 两块面板。PlayerSheet 用的是 ModalBottomSheet（挂在窗口上），
         //    所以放进这一格里也不会被 16:9 的圆角裁掉
         if (castSheetVisible) {
             CastSheet(

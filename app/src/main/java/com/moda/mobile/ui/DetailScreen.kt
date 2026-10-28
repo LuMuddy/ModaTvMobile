@@ -25,12 +25,10 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -58,8 +56,6 @@ import com.moda.mobile.model.SeriesDetail
 import com.moda.mobile.model.Tier
 import com.moda.mobile.ui.components.ActionButton
 import com.moda.mobile.ui.components.EmptyState
-import com.moda.mobile.ui.components.ErrorState
-import com.moda.mobile.ui.components.LoadingState
 import com.moda.mobile.ui.components.RemoteImage
 import com.moda.mobile.ui.components.SectionTitle
 import com.moda.mobile.ui.components.appErrorText
@@ -214,36 +210,39 @@ fun DetailScreen(
     fun isTrailer(ep: Episode) = trailerKeys.any { it.isNotBlank() && ep.label.contains(it) }
 
     Column(Modifier.fillMaxSize().background(ModaColors.Bg)) {
-        // 有内容时返回按钮在顶部小屏播放器的左上角（见 [DetailPreviewPlayer]）。
-        // 加载中 / 失败 / 空态根本没有那块区域，返回条必须自己补上——
-        // 否则那三种状态里屏幕上没有任何出口，只剩系统返回手势一条路。
-        if (detail == null) {
-            Row(
-                Modifier.fillMaxWidth().padding(start = 4.dp, end = 12.dp, top = 4.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                IconButton(onClick = onBack) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = stringResource(R.string.search_back),
-                        tint = ModaColors.Text,
-                    )
-                }
-            }
-        }
-
+        // 这一页**没有页面级返回条**：返回只由播放器卡片左上角那颗提供。
+        // 所以卡片必须在所有状态下都在组合里（见下面的 detail == null 分支）——
+        // 加载中/失败/空态也照画，只是它内部落成 loading / 错误面板。
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when {
-                // 拿不到详情时也要留得下出口：有 onRetry 就重试，没有就返回上一页
-                detail == null && error != null -> ErrorState(
-                    message = appErrorText(error),
-                    onRetry = onRetry ?: onBack,
-                )
-                detail == null && loading -> LoadingState(stringResource(R.string.detail_loading))
-                detail == null -> EmptyState(
-                    message = stringResource(R.string.detail_empty),
-                    onRetry = onRetry ?: onBack,
-                )
+                // 三态都渲染同一张卡片：它是这一页唯一的返回出口，
+                // 一旦哪一态跳过它，那一屏就没有返回了（只剩系统返回手势）。
+                // 状态文案挂在卡片下面，卡片本身按 loading / error 走自己的分支。
+                detail == null -> Column(Modifier.fillMaxSize()) {
+                    DetailPreviewPlayer(
+                        title = stringResource(R.string.detail_untitled),
+                        // 还没拿到这部剧：不喂任何地址，卡片内部显示"正在准备播放…"或错误面板
+                        preview = null,
+                        loading = loading,
+                        error = error,
+                        episodeIndex = -1,
+                        onRetry = { onRetry?.invoke() ?: onBack() },
+                        onBack = onBack,
+                        // 没有集数：全屏无处可去，屏上的空态会说明原因
+                        onEnterFullscreen = {},
+                        modifier = Modifier.padding(horizontal = 16.dp),
+                    )
+                    // loading 与失败都由卡片自己说清楚了（它内部有那两个分支），
+                    // 只剩"既不在加载、也没报错、就是没内容"这一种要在下面补一句 + 重试。
+                    if (!loading && error == null) {
+                        Box(Modifier.weight(1f).fillMaxWidth()) {
+                            EmptyState(
+                                message = stringResource(R.string.detail_empty),
+                                onRetry = onRetry ?: onBack,
+                            )
+                        }
+                    }
+                }
                 // 整页只剩满宽 item（选集已经改成横向轨道，不再是网格里的一格），
                 // 所以容器是 LazyColumn 而不是 LazyVerticalGrid
                 else -> LazyColumn(

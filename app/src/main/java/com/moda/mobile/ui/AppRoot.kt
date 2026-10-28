@@ -66,6 +66,7 @@ import com.moda.mobile.data.local.CopyrightNoticeStoreImpl
 import com.moda.mobile.data.local.SearchHistoryStoreImpl
 import com.moda.mobile.model.LibraryEntry
 import com.moda.mobile.ui.components.appErrorText
+import com.moda.mobile.ui.player.PlaybackSession
 import com.moda.mobile.ui.theme.ModaColors
 import com.moda.mobile.ui.theme.ModaType
 import kotlinx.coroutines.launch
@@ -272,6 +273,16 @@ private fun AuthorizedContent(vm: MainViewModel) {
     // 三件事必须同时成立，分散判断早晚有一处对不上。
     // 搜索 / 历史刻意不在这三项里：它们由首页工具栏压栈进来，返回键走 pop() 那条既有分支。
     val rootTab = RootTab.of(dest)
+
+    // 播放引擎的释放时机只跟「现在在哪个页面」有关，跟时限无关。
+    // 详情 ↔ 播放是同一次观看的两端：引擎必须活到这两页都走完，所以只要还停在其中一页就不释放；
+    // 一旦到了首页/收藏/设置/搜索等页面，这次观看就真的结束了，立刻释放
+    // （声音在 detach 那一刻就已经停了，这里回收的是内存与解码器）。
+    // 不能靠时限：播放页要等 VM 拉完地址（episodeInfo → pickBestTier → playLink）才 acquire，
+    // 这个网络往返可能比任何固定宽限期都长。
+    LaunchedEffect(dest) {
+        if (dest !is Dest.Player && dest !is Dest.Detail) PlaybackSession.releaseIfDetached()
+    }
 
     // 底栏显隐只由首页上报（其它两个一级页没有可滚动的网格，没人会报）。
     // 状态必须放在 Scaffold 这一层：底栏是它的 bottomBar，动画改的是它的位置。

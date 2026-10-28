@@ -15,6 +15,10 @@ import kotlinx.coroutines.launch
  * 「详情页小屏 → 点全屏」必然走一遍「详情页离开组合 → release → 播放页新建 → start 重新拉流」，
  * 用户看到的就是又转一圈缓冲。引擎必须活得比任何一个 Composable 都久。
  *
+ * 引用归零时「先静音、后释放」：没有画面在显示它 = 立刻 pause（离开就不该还有声），
+ * 引擎再留 [ReleaseGraceMs] 等下一页来挂载（横竖屏切换会重建 Activity，这段过渡远长于一帧）；
+ * 宽限期内挂载回来就接着播，超时才真 release。于是"小屏 → 全屏"既不重建、也不留声。
+ *
  * 身份 = 地址里 scheme/host 之后的那段路径（见 [keyOf]）。为什么不直接用 vid：详情页那一侧
  * 拿不到 vid（`DetailPreview` 只带地址），而两侧对同一集的「档位 → 直链」是同一条链路
  * （Repo.episodeInfo → pickBestTier → playLink），路径因此完全一致；
@@ -32,9 +36,19 @@ object PlaybackSession {
      * 路由切换时两个 Composable 的挂载/卸载顺序不保证：「详情页卸载」可能先于
      * 「播放页挂载」，中间是一段没有任何人 attach 的空窗。若归零即 release，
      * 播放页拿到的是被释放的引擎（或者更糟：它自己又新建一个，等于从头缓冲）。
-     * 800ms 远大于一次切换的耗时，又短到退回首页时听不出明显残响。
+     *
+     * **真正的释放时机由路由决定**（见 [releaseIfDetached]），这里只是兜底保险丝：
+     * 万一将来某条路径 detach 之后再没人 acquire，别让引擎永远留在内存里。
+     *
+     * 为什么时限救不了这件事：attached 归零到下一页 acquire 之间隔着**一整个网络往返**——
+     * 播放页的引擎是在 PlayerUi.Ready 分支里取的，而 Ready 要等 VM 跑完
+     * episodeInfo → pickBestTier → playLink。实测这段能超过 2.5s（日志里
+     * 「宽限期到期，释放引擎」之后 217ms 才「新建并起播」），所以任何固定时限都可能输给一个慢请求。
+     *
+     * 放这么大也不换来一声多余的响：归零那一刻已经**先 pause 了**（见 [scheduleRelease]），
+     * 宽限期里只是一台静音的引擎躺在内存里。
      */
-    private const val ReleaseGraceMs = 800L
+    private const val ReleaseGraceMs = 10_000L
 
     /** release 必须回主线程；immediate 让「已经在主线程」的调用同步执行，不迟一帧 */
     private val scope = CoroutineScope(Dispatchers.Main.immediate)
@@ -53,6 +67,12 @@ object PlaybackSession {
      * 这次 detach 会落在新引擎头上，把正在播的引擎判成「没人看」。
      */
     private var attached = 0
+
+    /** 归零时是否由我们按了暂停（决定挂载回来要不要恢复播放） */
+    private var suspendedByGrace = false
+
+    /** 按暂停之前它是否在播：用户自己暂停、投屏中暂停的引擎，挂载回来不许自己动起来 */
+    private var wasPlaying = false
 
     private class Entry(
         val engine: PlayerEngine,
@@ -93,6 +113,8 @@ object PlaybackSession {
             // 小屏建的那台引擎没有 vid：播放页复用它的同时把真 vid 补上，
             // 之后（换档位/换内核）才认得出"还是这一集"，从而接着当前进度而不是回到片头
             if (existing.vid.isBlank()) existing.vid = vid
+            // 宽限期内它被我们静音了：复用它的这一页就是要它接着播
+            resumeIfSuspendedByGrace()
             Log.i(TAG, "复用引擎 vid=" + vid + " attached=" + attached + " pos=" + existing.engine.positionMs)
             return existing.engine
         }
@@ -113,6 +135,9 @@ object PlaybackSession {
         }
         val fresh = PlayerEngines.create(context, core, hardware)
         current = Entry(engine = fresh, key = key, vid = vid, core = core, hardware = hardware)
+        // 新引擎跟上一台的暂停/播放状态无关
+        suspendedByGrace = false
+        wasPlaying = false
         // start 只出现在这里：复用路径永远走不到，所以同一集只会拉一次流。
         // 这条日志是「一次 start」的验收证据：详情 → 全屏那条路上它只应出现一次，
         // 后面跟着的都是"复用引擎"
@@ -121,16 +146,42 @@ object PlaybackSession {
         return fresh
     }
 
-    /** 有新的 Composable 开始显示这个引擎：取消宽限期释放 */
+    /** 有新的 Composable 开始显示这个引擎：取消宽限期释放，并把它从"宽限期静音"里唤醒 */
     fun attach() {
         cancelPendingRelease()
         attached++
+        resumeIfSuspendedByGrace()
     }
 
-    /** 显示它的 Composable 走了：归零后先等宽限期，不立刻 release */
+    /**
+     * 显示它的 Composable 走了。
+     * 归零时**先静音**（[scheduleRelease] 里同步 pause），再等宽限期才 release：
+     * 声音不等宽限期，引擎才等。
+     */
     fun detach() {
         if (attached > 0) attached--
         if (attached == 0) scheduleRelease()
+    }
+
+    /**
+     * 路由已经离开「观看」这件事时调用：没有任何画面在显示它，就立刻释放。
+     *
+     * 这是引擎**真正的**释放时机。它问的是「现在在哪个页面」，不是一个时限，
+     * 因此不会输给播放页那次网络往返：详情 ↔ 播放是同一次观看的两端，
+     * 两页都在期间谁 detach 都不释放；到了别的页面才释放。
+     *
+     * attached > 0 时什么都不做——那时还有画面在用它（这一帧刚被移除、onDispose 还没跑到时
+     * 也走这条，交给 [ReleaseGraceMs] 的兜底）。
+     */
+    fun releaseIfDetached() {
+        if (attached > 0) return
+        cancelPendingRelease()
+        val entry = current ?: return
+        Log.i(TAG, "已离开观看页，立即释放引擎 vid=" + entry.vid)
+        current = null
+        suspendedByGrace = false
+        wasPlaying = false
+        releaseEngine(entry.engine)
     }
 
     /**
@@ -139,6 +190,8 @@ object PlaybackSession {
      */
     fun discard() {
         cancelPendingRelease()
+        suspendedByGrace = false
+        wasPlaying = false
         val entry = current ?: return
         current = null
         releaseEngine(entry.engine)
@@ -156,6 +209,13 @@ object PlaybackSession {
 
     private fun scheduleRelease() {
         val entry = current ?: return
+        // 归零 = 屏幕上没有任何画面在显示它。声音必须**当场**停（"离开就不该还有声"），
+        // 但引擎先留着：横竖屏切换/路由切换这段空窗足够长，重建一次就是重新拉一次流。
+        // isPlaying 一定要在 pause 之前读——pause 之后它立刻就是 false，读到的就再也不是
+        // "离开时它到底在不在播"这件事了（那正是挂载回来该不该续播的唯一依据）。
+        wasPlaying = entry.engine.isPlaying
+        suspendedByGrace = true
+        entry.engine.pause()
         cancelPendingRelease()
         pendingRelease = scope.launch {
             delay(ReleaseGraceMs)
@@ -164,7 +224,27 @@ object PlaybackSession {
             if (attached > 0 || current !== entry) return@launch
             Log.i(TAG, "宽限期到期，释放引擎 vid=" + entry.vid)
             current = null
+            suspendedByGrace = false
+            wasPlaying = false
             releaseEngine(entry.engine)
+        }
+    }
+
+    /**
+     * 宽限期内被静音的引擎，一旦又有画面挂载就接着播。
+     *
+     * 只有「暂停是我们按的」且「按之前它真的在播」两条同时成立才恢复：
+     * 用户自己按过暂停、或者正在投屏（本地本来就是暂停）的引擎，挂载回来不许自己动起来。
+     */
+    private fun resumeIfSuspendedByGrace() {
+        val entry = current ?: return
+        if (!suspendedByGrace) return
+        val shouldResume = wasPlaying
+        suspendedByGrace = false
+        wasPlaying = false
+        if (shouldResume) {
+            Log.i(TAG, "宽限期内挂载，恢复播放 vid=" + entry.vid)
+            entry.engine.play()
         }
     }
 
