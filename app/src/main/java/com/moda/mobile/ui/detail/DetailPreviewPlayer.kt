@@ -7,6 +7,7 @@ import android.view.WindowManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -64,6 +65,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -528,6 +530,8 @@ fun DetailPreviewPlayer(
             Box(
                 Modifier
                     .fillMaxSize()
+                    // 显式 0：控制层是 1，命中永远先给控制层（绘制顺序上也排在它们之前）
+                    .zIndex(0f)
                     .pointerInput(engine) {
                         val slop = DragSlop.toPx()
                         awaitEachGesture {
@@ -631,9 +635,14 @@ fun DetailPreviewPlayer(
                 Modifier
                     .fillMaxWidth()
                     .align(Alignment.TopCenter)
+                    // 1 = 控制层，压在手势层（0）之上
+                    .zIndex(1f)
                     .background(
                         Brush.verticalGradient(listOf(Color(0xCC000000), Color(0x00000000))),
                     )
+                    // 带子空白处自己吃掉点击：否则点在图标之间的缝隙会穿透到下面那层
+                    // "点画面显隐"，表现为"点控制条反而把它收起来了"
+                    .pointerInput(Unit) { detectTapGestures { } }
                     .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
                 verticalAlignment = Alignment.CenterVertically,
@@ -672,9 +681,14 @@ fun DetailPreviewPlayer(
                 Modifier
                     .fillMaxWidth()
                     .align(Alignment.BottomCenter)
+                    // 1 = 控制层，压在手势层（0）之上。**这一条是"点得到"的关键**：
+                    // 行内 Slider/按钮之外的缝隙原本没有命中目标，点击会落到手势层被当成
+                    // "点画面"——现在由这一行的 pointerInput 兜住，落在控制条上永远只属于控制条。
+                    .zIndex(1f)
                     .background(
                         Brush.verticalGradient(listOf(Color(0x00000000), Color(0xE6000000))),
                     )
+                    .pointerInput(Unit) { detectTapGestures { } }
                     .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
