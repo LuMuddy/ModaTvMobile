@@ -28,3 +28,13 @@ Thumbs.db
 # Signing
 *.jks
 *.keystore
+
+# Build outputs / installers
+*.apk
+*.aab
+*.idsig
+*.ap_
+captures/
+
+# Logs
+*.log

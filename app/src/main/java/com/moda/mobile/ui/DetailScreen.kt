@@ -1,7 +1,7 @@
 package com.moda.mobile.ui
 
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -28,9 +29,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material3.Icon
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -59,6 +58,7 @@ import com.moda.mobile.ui.components.ActionButton
 import com.moda.mobile.ui.components.EmptyState
 import com.moda.mobile.ui.components.ErrorState
 import com.moda.mobile.ui.components.LoadingState
+import com.moda.mobile.ui.components.RemoteImage
 import com.moda.mobile.ui.components.SectionTitle
 import com.moda.mobile.ui.components.appErrorText
 import com.moda.mobile.ui.detail.DetailPreviewPlayer
@@ -78,31 +78,25 @@ private val FavoriteYellow = Color(0xFFFFC53D)
 private const val DESC_COLLAPSED_LINES = 3
 
 /**
- * 选集格子的高度。
+ * 选集格子在整个网格里的起始下标。
  *
- * 40dp 是密集排法的上限附近：一屏能扫到五行以上集号才叫「能挑集」，
- * 一旦回到 44dp 以上、或者让分集描述进到格子里，一屏就只剩三四行。
- * 格子高度写成常量而不是靠内容撑开，是为了让它不受角标/描述影响——行高恒定，6 列才不会歪。
+ * 值 = 它前面那几个满宽 item 的个数，逐项对齐现在的 item 顺序：
+ *   0 播放器 [player] / 1 片名 [title] / 2 收藏+简介 [actions] / 3 选集标题 [episodes-title]
+ * 1 号那项在片名为空时不组合，所以真正用的是按同一条件推算出来的值（见 episodeItemStart）：
+ * 只改这边不改那边，续播滚动会落在隔壁一集上。
  */
-private val EpisodeCellHeight = 40.dp
-
-/** 选集格子在整个网格里的起始下标：小屏播放器、页头、区块标题各占一个满宽 item */
-private const val EPISODE_ITEM_START = 3
+private const val EPISODE_ITEM_START = 4
 
 /**
- * 「不滚也看得见」的集数上限：续播集落在这个范围内就不滚。
+ * 「不滚也看得见」的格子数上限：续播集落在这个范围内就不滚。
  *
- * 12 是按当前布局估出来的近似值，不是量出来的：页头（海报 + 标题 + 主按钮 + 折叠简介）
- * 大约吃掉首屏的六成，剩下的空间按每行 6 格、行高 40dp + 8dp 间距算，还放得下两行。
- * 布局大改（页头变矮、格子变高、列数变了）时这个数要跟着调——
- * 它的唯一职责是「续播集已经在一屏里就别动滚动位置」，估小了会把页头白顶出去。
+ * 3 列之后行高约 90dp（16:9 缩略图 ≈ 58dp + 一行集号），首屏在 640~800dp 高的机器上
+ * 大约看到 2.5~4 行，取 3 行 = 9 格。**宁可估小**：估大的代价是"为了一个已经在屏幕上的格子
+ * 把播放器顶出去"，估小的代价只是用户往下滑一下。
  */
-private const val EPISODE_VISIBLE_WITHOUT_SCROLL = 12
+private const val EPISODE_VISIBLE_WITHOUT_SCROLL = 9
 
-/** 预告角标的靛蓝，与 components/Cards.kt 里 EpisodeChip 用的是同一个色值 */
-private val TrailerIndigo = Color(0xFF5C6BC0)
-
-/** VIP 角标的金：选集格子右下角那颗「VIP」用它（页头那颗同色角标已经删掉） */
+/** VIP 角标的金：选集缩略图右上角那颗「VIP」用它 */
 private val VipGold = Color(0xFFE0A32E)
 
 /**
@@ -216,17 +210,25 @@ fun DetailScreen(
         onDispose { clearPreviewNow() }
     }
 
+    /**
+     * 选集格子的真实起始下标。
+     *
+     * [EPISODE_ITEM_START] 是按"播放器 / 片名 / 收藏+简介 / 选集标题"四个满宽 item 数的；
+     * 片名为空时那个 item 不组合，这里必须跟着减 1——差一格就会把续播滚到隔壁那一集，
+     * 也就是"滚了，但停在错的地方"这种最难查的表现。
+     */
+    val episodeItemStart = EPISODE_ITEM_START - if (detail?.title.isNullOrBlank() == true) 1 else 0
+
     val gridState = rememberLazyGridState()
     // 进入页面直接落到续播那一集：几百集的连载不滚的话，用户得自己往下滑几十屏才找得到自己看到哪。
-    // 但续播集本来就在首屏里时不滚：为了一个已经看得见的格子把页头（海报、标题、收藏）
-    // 顶出屏幕，是把这块内容换一个没有收益的位移。
+    // 但续播集本来就在首屏里时不滚：为了一个已经看得见的格子把播放器顶出屏幕，
+    // 是把最该看的东西换一个没有收益的位移（阈值见 EPISODE_VISIBLE_WITHOUT_SCROLL）。
     // 只给下标、不给像素偏移：靠近首尾时 scrollToItem 自己贴边，写死偏移反而会在两端越界。
     // 下标夹取到 [0, 末集]：集数表换了/历史对不上时 resumeIndex 可能落在范围外，不夹会直接崩。
-    LaunchedEffect(detail?.cid, resume?.loaded, resumeIndex) {
+    LaunchedEffect(detail?.cid, resume?.loaded, resumeIndex, episodeItemStart) {
         if (showEpisodes && resumeIndex >= EPISODE_VISIBLE_WITHOUT_SCROLL && !userTouched) {
             gridState.scrollToItem(
-                (EPISODE_ITEM_START + resumeIndex)
-                    .coerceIn(0, EPISODE_ITEM_START + episodes.lastIndex),
+                (episodeItemStart + resumeIndex).coerceIn(0, episodeItemStart + episodes.lastIndex),
             )
         }
     }
@@ -268,13 +270,13 @@ fun DetailScreen(
                     onRetry = onRetry ?: onBack,
                 )
                 else -> LazyVerticalGrid(
-                    // 6 列：选集区就是这张网格（小屏播放器/页头/标题/底部提示都用满宽 span），
-                    // 所以列数是选集区的排法，不是整页的排版
-                    columns = GridCells.Fixed(6),
+                    // 3 列：列数是**选集区**的排法，不是整页的排版（其余都是满宽 span）。
+                    // 每格 = 16:9 缩略图 + 一行集号：360dp 屏上格宽约 104dp、图高约 58dp，
+                    // 411dp 屏上约 125dp 宽。再密（4 列以上）缩略图就只剩马赛克，集号也挤不出。
+                    columns = GridCells.Fixed(3),
                     state = gridState,
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 24.dp),
-                    // 格间距 8dp：360dp 宽的屏上每格约 48dp，再大就挤不进 6 列
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
@@ -302,8 +304,23 @@ fun DetailScreen(
                         )
                     }
 
-                    // 海报/片名/元信息/集号整块去掉：播放器左上角已经写着「片名 · 第 N 集」，
-                    // 再来一遍只是把选集往下推。这里只剩收藏（唯一入口）与可展开的剧情简介
+                    // 片名从播放器的覆盖层挪到这里：覆盖层收起时那行字就没了，而"我在看什么剧"
+                    // 是这一页最该一直可读的信息。不带集号——选集格子里写着集数，重复没有意义。
+                    // 片名为空（异常数据）时整个 item 不组合，不留一条空行。
+                    if (detail.title.isNotBlank()) {
+                        item(span = { GridItemSpan(maxLineSpan) }, key = "title") {
+                            Text(
+                                text = detail.title,
+                                style = ModaType.Heading,
+                                color = ModaColors.Text,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                            )
+                        }
+                    }
+
+                    // 收藏（唯一入口）+ 可展开的剧情简介
                     item(span = { GridItemSpan(maxLineSpan) }, key = "actions") {
                         DetailActions(
                             detailCid = detail.cid,
@@ -364,7 +381,7 @@ fun DetailScreen(
                             key = { index, ep -> "ep-${ep.vid}-$index" },
                         ) { index, ep ->
                             EpisodeCell(
-                                number = ep.index + 1,
+                                episode = ep,
                                 selected = index == currentIndex,
                                 completed = index in completedIndexes,
                                 isVip = ep.isVip,
@@ -411,12 +428,12 @@ fun DetailScreen(
 }
 
 /**
- * 播放器下方的那一条：收藏按钮 + 可展开的剧情简介。
+ * 播放器下方的那一条：收藏（一颗心）+ 可展开的剧情简介。
  *
- * 竖版海报、片名、元信息（集数/分类/主演）、「第 N 集」全部不再画：播放器左上角已经写着
- * 「片名 · 第 N 集」，这些是同一件事的第二遍，代价是首屏被它吃掉三分之一。
+ * 收藏只剩图标：不再有「收藏 / 已收藏」那两个字的按钮，把宽度让给简介与选集。
+ * 但**不能删**——详情页是收藏数据唯一的产生入口，删了收藏页永远是空的。
+ * 实心=已收藏、描边=未收藏，形状本身就是状态，颜色只负责加重读感。
  *
- * 收藏**不能**跟着删：详情页是这个数据唯一的产生入口，没有它收藏页永远是空的。
  * 简介也不能删：播放器里没有剧情简介，而这是用户决定要不要看下去的依据。
  */
 @Composable
@@ -426,47 +443,33 @@ private fun DetailActions(
     isFavorite: Boolean,
     onToggleFavorite: () -> Unit,
 ) {
-    // top = 4dp 是"补足"而不是"起点"：网格 item 之间本来就有 8dp 的 verticalArrangement，
-    // 加起来正好是设计要的 12dp，写 12dp 会变成 20dp
+    // top = 4dp 是"补足"而不是"起点"：网格 item 之间本来就有 8dp 的 verticalArrangement
     Column(Modifier.fillMaxWidth().padding(top = 4.dp)) {
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            // 收藏是这个数据唯一的产生入口：没有它收藏页永远是空的。
-            // 返回交给屏幕上方的返回条与系统返回手势，这里不再摆第二个返回按钮
-            OutlinedButton(
-                onClick = onToggleFavorite,
-                modifier = Modifier.height(48.dp),
-                shape = RoundedCornerShape(12.dp),
-                border = BorderStroke(1.dp, if (isFavorite) FavoriteYellow else ModaColors.SurfaceHigh),
-                colors = ButtonDefaults.outlinedButtonColors(
-                    contentColor = if (isFavorite) FavoriteYellow else ModaColors.Text,
-                ),
-            ) {
-                Icon(
-                    imageVector = if (isFavorite) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
-                    contentDescription = if (isFavorite) {
-                        stringResource(R.string.detail_fav_remove_desc)
-                    } else {
-                        stringResource(R.string.detail_fav_add_desc)
-                    },
-                    modifier = Modifier.size(18.dp),
-                    tint = if (isFavorite) FavoriteYellow else ModaColors.Text,
-                )
-                Spacer(Modifier.width(6.dp))
-                Text(
-                    text = if (isFavorite) {
-                        stringResource(R.string.m_feed_fav_remove)
-                    } else {
-                        stringResource(R.string.m_feed_fav_add)
-                    },
-                    style = ModaType.Body,
-                    color = if (isFavorite) FavoriteYellow else ModaColors.Text,
-                    maxLines = 1,
-                )
-            }
+        // 用 Box 而不是 IconButton：IconButton 会把图标居中在 48dp 里，
+        // 心形就比下面的简介文字右缩进 12dp；这里让图标贴左，和简介同一条左边缘。
+        // 触控区仍是 44dp（触摸纪律的下限），图标本身 24dp。
+        Box(
+            Modifier
+                .size(44.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .clickable(onClick = onToggleFavorite),
+            contentAlignment = Alignment.CenterStart,
+        ) {
+            Icon(
+                imageVector = if (isFavorite) Icons.Filled.Favorite else Icons.Outlined.FavoriteBorder,
+                // 无障碍：图标没有文字，状态必须进描述（复用既有键，不新增文案）
+                contentDescription = if (isFavorite) {
+                    stringResource(R.string.detail_fav_remove_desc)
+                } else {
+                    stringResource(R.string.detail_fav_add_desc)
+                },
+                modifier = Modifier.size(24.dp),
+                tint = if (isFavorite) FavoriteYellow else ModaColors.Text,
+            )
         }
 
         if (description.isNotBlank()) {
-            Spacer(Modifier.height(14.dp))
+            Spacer(Modifier.height(2.dp))
             DescriptionBlock(detailCid = detailCid, description = description)
         }
     }
@@ -509,66 +512,100 @@ private fun DescriptionBlock(detailCid: String, description: String) {
 }
 
 /**
- * 选集网格的一格：只有集号，四种状态全部画成角标。
+ * 选集网格的一格：16:9 缩略图 + 一行集号。
  *
- * 为什么不再用 components 里的 [com.moda.mobile.ui.components.EpisodeChip]：
- * 那个组件把分集描述按两行画在格子里，格高随内容变（综艺能到 60dp 以上），
- * 6 列网格上一屏就只剩三行集号——这正是用户截图里嫌浪费的那件事。
- * 密集排法里一格的职责只有两件：看得见集号、点得到。描述交给网格上方那一行。
+ * 为什么从"只有数字"改成带图：纯数字格在几百集的连载里只能靠记集号找人，
+ * 缩略图才是"我上次看到哪儿"的第一眼线索。代价是列数从 6 降到 3——
+ * 360dp 屏上格宽约 104dp、图高约 58dp，集号刚好还读得清；再密就是"图看不清、字也挤"。
  *
- * 四个角各管一件事，互不打架，也都不参与排版（格子高度是常量）：
- * 左上「预告」（分类）、右上绿勾（已看完）、右下 VIP、整格主色底（当前集）。
+ * 当前集**不整格填色**（填色会把缩略图压暗）：2dp 主色描边 + 集号文字变主色。
+ * 角标：预告（左上）/ VIP（右上）/ 已看完绿勾（右上，压在 VIP 左侧，两者错开不互相盖）。
+ * 分集描述不进格子（它会把格子撑高），仍放在「选集」标题行下方那一行。
  */
 @Composable
 private fun EpisodeCell(
-    number: Int,
+    episode: Episode,
     selected: Boolean,
     completed: Boolean,
     isVip: Boolean,
     isTrailer: Boolean,
     onClick: () -> Unit,
 ) {
-    Box(
+    Column(
         Modifier
             .fillMaxWidth()
-            .height(EpisodeCellHeight)
-            .clip(RoundedCornerShape(8.dp))
-            .background(if (selected) ModaColors.Accent else ModaColors.SurfaceHigh)
+            .clip(RoundedCornerShape(10.dp))
             .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
     ) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(16f / 9f)
+                .clip(RoundedCornerShape(8.dp)),
+        ) {
+            // Episode.cover 已按 vid 拼好地址；取不到时 RemoteImage 自己落成文字色块
+            RemoteImage(
+                url = episode.cover,
+                title = episode.label,
+                preferHiRes = false,
+                modifier = Modifier.fillMaxSize(),
+                corner = 8.dp,
+            )
+            if (isTrailer) {
+                CellBadge(
+                    text = stringResource(R.string.core_badge_trailer),
+                    color = Color.White,
+                    modifier = Modifier.align(Alignment.TopStart).padding(3.dp),
+                )
+            }
+            if (isVip) {
+                CellBadge(
+                    text = "VIP",
+                    color = VipGold,
+                    modifier = Modifier.align(Alignment.TopEnd).padding(3.dp),
+                )
+            }
+            if (completed) {
+                // 错开 VIP：绿勾贴在「VIP」左边，两者都在右上角但不重叠
+                CompletedBadge(
+                    Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(end = 26.dp, top = 4.dp),
+                )
+            }
+            // 当前集：描边画在图片之上才看得出来（放在最后 ⇒ 覆盖在缩略图上）
+            if (selected) {
+                Box(
+                    Modifier
+                        .matchParentSize()
+                        .border(2.dp, ModaColors.Accent, RoundedCornerShape(8.dp)),
+                )
+            }
+        }
         Text(
-            // 格子里只放数字：48dp 宽的格子塞不下「第 128 集」，而集号本身就是这一格的唯一信息
-            text = number.toString(),
-            style = ModaType.Body,
-            color = Color.White,
+            text = stringResource(R.string.core_episode_index, episode.index + 1),
+            style = ModaType.Caption,
+            color = if (selected) ModaColors.AccentSoft else ModaColors.TextDim,
             maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = 3.dp, bottom = 1.dp),
         )
-        if (isTrailer) {
-            Text(
-                text = stringResource(R.string.core_badge_trailer),
-                style = ModaType.Caption,
-                fontSize = 9.sp,
-                // 选中格是主色底：靛蓝压蓝底读不出来，这时候让位给白字
-                color = if (selected) Color.White else TrailerIndigo,
-                maxLines = 1,
-                modifier = Modifier.align(Alignment.TopStart).padding(start = 3.dp, top = 1.dp),
-            )
-        }
-        if (completed) {
-            CompletedBadge(Modifier.align(Alignment.TopEnd).padding(1.dp))
-        }
-        if (isVip) {
-            Text(
-                text = "VIP",
-                style = ModaType.Caption,
-                fontSize = 9.sp,
-                color = VipGold,
-                maxLines = 1,
-                modifier = Modifier.align(Alignment.BottomEnd).padding(end = 3.dp, bottom = 1.dp),
-            )
-        }
     }
+}
+
+/** 缩略图上的小角标：深色圆角底 + 一行字（压在亮图上才读得出） */
+@Composable
+private fun CellBadge(text: String, color: Color, modifier: Modifier = Modifier) {
+    Text(
+        text = text,
+        style = ModaType.Caption,
+        fontSize = 9.sp,
+        color = color,
+        maxLines = 1,
+        modifier = modifier
+            .background(Color(0x99000000), RoundedCornerShape(4.dp))
+            .padding(horizontal = 3.dp, vertical = 1.dp),
+    )
 }
 
 /**

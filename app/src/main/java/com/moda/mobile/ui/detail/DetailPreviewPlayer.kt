@@ -29,10 +29,13 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.BrightnessMedium
 import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Speed
 import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -50,6 +53,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.changedToUpIgnoreConsumed
@@ -58,7 +62,6 @@ import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.Lifecycle
@@ -81,6 +84,7 @@ import com.moda.mobile.ui.player.PlayerEngine
 import com.moda.mobile.ui.player.PlayerEngines
 import com.moda.mobile.ui.player.SpeedSheet
 import com.moda.mobile.ui.player.findActivity
+import com.moda.mobile.ui.player.formatClock
 import com.moda.mobile.ui.theme.ModaColors
 import com.moda.mobile.ui.theme.ModaType
 import kotlin.math.abs
@@ -109,6 +113,17 @@ private const val LevelDragHeightRatio = 0.6f
 /** 松手后指示器停留时长：拖完立刻消失等于没给反馈 */
 private const val LevelAutoHideMs = 800L
 
+/** 控件层无操作自动收起：与全屏播放页同一个 3 秒，用户不必学两套时序 */
+private const val ControlsAutoHideMs = 3000L
+
+/**
+ * 底部控制条占的高度（44dp 按钮 + 上下内边距）。
+ *
+ * 右下角的全屏键要抬到这条之上，否则会和进度条末端的"总时长"叠在一起。
+ * 与全屏页的 ControlsBottomInset 同一个思路：位置由高度常量算，不要在两头各写一个魔数。
+ */
+private val ControlBarHeight = 66.dp
+
 /** 纵滑调的是亮度还是音量（判定用手势起点 x，见手势层注释） */
 private enum class LevelKind { Brightness, Volume }
 
@@ -132,6 +147,7 @@ private enum class LevelKind { Brightness, Volume }
  */
 @Composable
 fun DetailPreviewPlayer(
+    /** 只喂给投屏元数据（电视上显示片名）；覆盖层不画标题，片名由页面自己排 */
     title: String,
     /** 要播的地址；null = 还没装好 */
     preview: DetailPreview?,
@@ -167,6 +183,21 @@ fun DetailPreviewPlayer(
     var playError by remember(primaryUrl, attempt) { mutableStateOf<PlayerError?>(null) }
     var speed by remember { mutableFloatStateOf(1f) }
     var speedSheetVisible by remember { mutableStateOf(false) }
+
+    // —— 控件层显隐（返回除外）——
+    // 默认收起：这一格是"顺手看一眼"的位置，四个角一直挂着按钮会永久压住画面。
+    // 但**返回不收**——它是这一格唯一的出口，藏起来用户下一次就找不到了。
+    var controlsVisible by remember { mutableStateOf(false) }
+    // 任何交互都 +1：自动收起的计时以它为准，key 变了旧计时自然被取消（同全屏页 controlsTick）
+    var controlsTick by remember { mutableIntStateOf(0) }
+
+    // —— 进度 ——
+    // 位置/时长只能轮询（PlayerEngine 只有 getter、没有进度回调），500ms 一次够拖动条用
+    var positionMs by remember { mutableLongStateOf(0L) }
+    var durationMs by remember { mutableLongStateOf(0L) }
+    // 拖动中只改预览值，松手才 seek：拖动时每帧 seek 会把播放器拖到卡死
+    var scrubbing by remember { mutableStateOf(false) }
+    var scrubMs by remember { mutableLongStateOf(0L) }
 
     /**
      * 引擎重建的 key：地址与重试次数。换地址必须换引擎——PlayerEngine 的 start 是"起播"，
@@ -232,10 +263,16 @@ fun DetailPreviewPlayer(
         buffering = value
     }
 
-    /** 单击画面的唯一动作：播放/暂停。错误态下没有画面，这一层压根不挂 */
+    /** 控制层里的播放/暂停（单击画面的语义已经改成显隐控制层） */
     fun togglePlay() {
         val e = engine ?: return
         if (e.isPlaying) e.pause() else e.play()
+    }
+
+    /** 「我动过」的唯一入口：显示控制层 + 重置自动收起计时 */
+    fun touchControls() {
+        controlsVisible = true
+        controlsTick++
     }
 
     fun handleError(err: PlayerError) {
@@ -331,6 +368,24 @@ fun DetailPreviewPlayer(
         if (levelTick == 0) return@LaunchedEffect
         delay(LevelAutoHideMs)
         levelKind = null
+    }
+
+    // 控制层 3 秒无操作自动收起。面板开着时不收：那会儿用户在看面板，
+    // 收起只会让关掉面板后这一格变成"什么都没有"。
+    LaunchedEffect(controlsVisible, controlsTick, castSheetVisible, speedSheetVisible) {
+        if (!controlsVisible || castSheetVisible || speedSheetVisible) return@LaunchedEffect
+        delay(ControlsAutoHideMs)
+        controlsVisible = false
+    }
+
+    // 进度轮询：拖动期间不覆盖预览值，其余时间跟随引擎（PlayerEngine 只有 getter）
+    LaunchedEffect(engine) {
+        val e = engine ?: return@LaunchedEffect
+        while (true) {
+            if (!scrubbing) positionMs = e.positionMs
+            durationMs = e.durationMs
+            delay(500)
+        }
     }
 
     // 电视上要显示的名字：与全屏页同一拼法（标题 · 集号），也就是 metadata 里的 dc:title。
@@ -467,6 +522,8 @@ fun DetailPreviewPlayer(
                                 if (!dragging) {
                                     if (abs(accumY) <= slop) continue
                                     dragging = true
+                                    // 拖动也算"一次交互"：控制层跟着出来，并把 3 秒计时重置
+                                    touchControls()
                                     // 判定用**手势起点**的 x（down.position），不是实时 x：
                                     // 手指在拖动中越过中线，不该把"正在调音量"改成"正在调亮度"
                                     kind = if (down.position.x < size.width / 2f) {
@@ -495,79 +552,146 @@ fun DetailPreviewPlayer(
                                     }
                                 }
                             }
-                            // 抬手时还没越过斜率 = 单击。手势被系统打断（来电/划走）不算单击，
-                            // 只有真的"抬起"才切播放——否则一次被打断的滑动会莫名其妙暂停画面
-                            if (dragging) levelTick++ else if (lifted) togglePlay()
+                            // 抬手时还没越过斜率 = 单击：展开时再点立即收起，收起时显示并重新计时。
+                            // **纵滑优先**：一旦越过 slop 就是拖动，既不切显隐也不算单击。
+                            // 手势被系统打断（来电/划走）不算单击，只有真的"抬起"才动作。
+                            if (dragging) {
+                                levelTick++
+                            } else if (lifted) {
+                                if (controlsVisible) controlsVisible = false else touchControls()
+                            }
                         }
                     },
             )
         }
 
-        // 3) 左上角：返回 + **同一行**的「片名 · 第 N 集」，整页仅此一处文字。
-        //    标题不另起一行：这一格只有 16:9（手机竖屏约 184dp 高），多占一行会把文字压向画面中央，
-        //    左上角也只剩下一个孤零零的返回键。
-        //    end = 108dp 是给右上角那两颗 44dp 图标留的位置（44+8+44 + 两侧 6dp 内边距），
-        //    标题只吃剩下的宽度：长片名在这里 ellipsis，不会钻到投屏/倍速图标底下。
-        Row(
-            Modifier
-                .align(Alignment.TopStart)
-                .padding(start = 4.dp, top = 8.dp, end = 108.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            CornerIcon(
-                icon = Icons.AutoMirrored.Filled.ArrowBack,
-                description = stringResource(R.string.search_back),
-                onClick = onBack,
-            )
-            // 8dp 是图标圆底与文字之间的呼吸位；再大标题就离开返回键的视线范围了
-            Spacer(Modifier.width(8.dp))
-            Text(
-                text = listOf(title, episodeLabel).filter { it.isNotBlank() }.joinToString(" · "),
-                // 降一档：Caption（12sp）+ 主文字色。Heading/Body 在这块画面里会把标题顶成第二条字幕
-                style = ModaType.Caption,
-                color = ModaColors.Text,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                // fill = false：占"剩余宽度"但不强行撑满，短片名不会把这一行拉出一段空白
-                modifier = Modifier.weight(1f, fill = false),
-            )
-        }
+        // 3) 左上角：只有返回一颗，而且**常驻**——控件层收起时它是这一格唯一的出口，
+        //    藏起来用户下一次就找不到了（这也是唯一不参与显隐的控件）。
+        //    片名不在这里：标题已经挪到页面内容里（播放器下方），覆盖层不再叠文字。
+        CornerIcon(
+            icon = Icons.AutoMirrored.Filled.ArrowBack,
+            description = stringResource(R.string.search_back),
+            onClick = onBack,
+            modifier = Modifier.align(Alignment.TopStart).padding(start = 4.dp, top = 8.dp),
+        )
 
         // 4) 右上角：投屏 + 倍速（间距 8dp）。投屏中额外挂一条「正在投屏到 X」——
         //    投到电视之后手机是黑的，不写出来用户没法确认自己投成功了没有
-        Row(
-            Modifier.align(Alignment.TopEnd).padding(6.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            casting?.let { device ->
-                CastStatusChip(deviceName = device.friendlyName, modifier = Modifier.widthIn(max = 132.dp))
+        if (controlsVisible) {
+            Row(
+                Modifier.align(Alignment.TopEnd).padding(6.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                casting?.let { device ->
+                    CastStatusChip(deviceName = device.friendlyName, modifier = Modifier.widthIn(max = 132.dp))
+                }
+                CornerIcon(
+                    icon = Icons.Filled.Cast,
+                    description = stringResource(R.string.m_player_cast_title),
+                    tint = if (casting != null) ModaColors.Accent else Color.White,
+                    onClick = {
+                        castFailure = false
+                        castSheetVisible = true
+                    },
+                )
+                CornerIcon(
+                    icon = Icons.Filled.Speed,
+                    description = stringResource(R.string.player_speed),
+                    onClick = { speedSheetVisible = true },
+                )
             }
+        }
+
+        // 5) 右下角：全屏一颗——进既有播放页播"小屏正在播的这一集"。
+        //    它和底部进度条都排在底部，所以两者都在控制层里：收起时整块底部让给画面
+        if (controlsVisible) {
             CornerIcon(
-                icon = Icons.Filled.Cast,
-                description = stringResource(R.string.m_player_cast_title),
-                tint = if (casting != null) ModaColors.Accent else Color.White,
-                onClick = {
-                    castFailure = false
-                    castSheetVisible = true
-                },
-            )
-            CornerIcon(
-                icon = Icons.Filled.Speed,
-                description = stringResource(R.string.player_speed),
-                onClick = { speedSheetVisible = true },
+                icon = Icons.Filled.Fullscreen,
+                description = stringResource(R.string.danmaku_region_full),
+                onClick = onEnterFullscreen,
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(end = 6.dp, bottom = ControlBarHeight + 6.dp),
             )
         }
 
-        // 5) 右下角：全屏一颗——进既有播放页播"小屏正在播的这一集"
-        CornerIcon(
-            icon = Icons.Filled.Fullscreen,
-            description = stringResource(R.string.danmaku_region_full),
-            onClick = onEnterFullscreen,
-            modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
-        )
+        // 6) 底部控制条：播放/暂停 + 当前时间 + 进度 + 总时长，一条 3dp 细轨。
+        //    只在控制层展开时出现；背景是自下而上的渐变而不是整条压黑——这一格本来就小，
+        //    一整块黑底会把画面切掉一条。
+        if (controlsVisible) {
+            val maxMs = durationMs.coerceAtLeast(1L)
+            val shownMs = if (scrubbing) scrubMs else positionMs
+            Column(
+                Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .background(
+                        Brush.verticalGradient(
+                            listOf(Color(0x00000000), Color(0xCC000000), Color(0xE6000000)),
+                        ),
+                    )
+                    .padding(start = 12.dp, end = 12.dp, top = 14.dp, bottom = 8.dp),
+            ) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    // 播放/暂停：与全屏页一样是"控制层里的第一颗"，不再是单击画面的语义
+                    Box(
+                        Modifier
+                            .size(44.dp)
+                            .clip(CircleShape)
+                            .clickable {
+                                togglePlay()
+                                touchControls()
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                            // 与全屏页底栏同一条约定：这颗图标不单独写描述，时长与进度紧挨着它
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(26.dp),
+                        )
+                    }
+                    Spacer(Modifier.width(2.dp))
+                    Text(
+                        text = formatClock(shownMs),
+                        style = ModaType.Caption,
+                        color = Color.White,
+                        maxLines = 1,
+                    )
+                    Slider(
+                        value = shownMs.coerceIn(0L, maxMs).toFloat(),
+                        valueRange = 0f..maxMs.toFloat(),
+                        // 拖：只更新预览值（shownMs 走 scrubMs），并重置收起计时
+                        onValueChange = { value ->
+                            scrubbing = true
+                            scrubMs = value.toLong()
+                            touchControls()
+                        },
+                        // 松手才 seek：拖动中每帧 seek 会把播放器拖死（与全屏页同规矩）
+                        onValueChangeFinished = {
+                            engine?.seekTo(scrubMs)
+                            positionMs = scrubMs
+                            scrubbing = false
+                            touchControls()
+                        },
+                        modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
+                    )
+                    Text(
+                        text = formatClock(durationMs),
+                        style = ModaType.Caption,
+                        color = Color.White,
+                        maxLines = 1,
+                    )
+                }
+            }
+        }
 
-        // 6) 缓冲指示：首帧还没出来时给一个细环，免得这一格看起来就是坏了
+        // 7) 缓冲指示：首帧还没出来时给一个细环，免得这一格看起来就是坏了
         if (interactive && buffering && !playing) {
             CircularProgressIndicator(
                 modifier = Modifier.align(Alignment.Center).size(22.dp),
@@ -576,12 +700,12 @@ fun DetailPreviewPlayer(
             )
         }
 
-        // 7) 纵滑指示：图标 + 百分比，松手 800ms 后收掉
+        // 8) 纵滑指示：图标 + 百分比，松手 800ms 后收掉
         levelKind?.let { kind ->
             LevelIndicator(kind = kind, value = levelValue, modifier = Modifier.fillMaxSize())
         }
 
-        // 8) 两块面板。PlayerSheet 用的是 ModalBottomSheet（挂在窗口上），
+        // 9) 两块面板。PlayerSheet 用的是 ModalBottomSheet（挂在窗口上），
         //    所以放进这一格里也不会被 16:9 的圆角裁掉
         if (castSheetVisible) {
             CastSheet(

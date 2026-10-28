@@ -12,11 +12,11 @@
 
 | 首页（19 分类，可横滑分页） | 详情（6 列选集 + 已看完/预告/VIP 角标） |
 | --- | --- |
-| ![首页](docs/screenshots/home.png) | ![详情](docs/screenshots/detail.png) |
+| ![首页](docs/screenshots/home.webp) | ![详情](docs/screenshots/detail.webp) |
 
 | 搜索（热词轮播） | 历史（条目进度条） |
 | --- | --- |
-| ![搜索](docs/screenshots/search.png) | ![历史](docs/screenshots/history.png) |
+| ![搜索](docs/screenshots/search.webp) | ![历史](docs/screenshots/history.webp) |
 
 截图取自 1440×3120 的 Pixel 类模拟器；播放页与设置页的截图随后续 UI 调整一并补。
 
