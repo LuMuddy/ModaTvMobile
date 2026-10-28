@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 只做 Compose 宿主，所以这层 Android 主题越薄越好：
+     不继承 appcompat 的 Theme.AppCompat（那会把 appcompat 依赖拖进来），
+     也不要 Theme.Material.Light —— 界面恒为深色（ModaColors.Bg = #0B0B0F），
+     亮色底主题会在首帧绘制前闪一下白，并让系统弹窗/状态栏走进亮色分支。
+     windowBackground 与 Compose 背景同色，冷启动那一帧与首帧无缝。 -->
+<resources>
+    <style name="Theme.Moda" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#0B0B0F</item>
+        <item name="android:statusBarColor">#0B0B0F</item>
+        <item name="android:navigationBarColor">#0B0B0F</item>
+    </style>
+</resources>

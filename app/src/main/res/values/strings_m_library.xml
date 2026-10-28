@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 手机端新增文案（m_ 前缀）。T1 已移植全部 TV 端 strings_*.xml，这里只补手机端独有的几句。 -->
+
+    <!-- 授权门（契约 §0.3）：手机端除了二维码，还多一条「在本机用微信打开授权链接」的路 -->
+    <string name="m_gate_message">在另一台手机上用微信「扫一扫」扫码并确认；也可以直接点下面的按钮，用本机微信打开这条授权链接。</string>
+    <string name="m_gate_wechat_open">用微信打开授权链接</string>
+    <string name="m_gate_wechat_hint">按钮会用系统的「打开链接」拉起微信；没装微信也可以选其它浏览器。</string>
+    <string name="m_gate_wechat_failed">没有能打开这条链接的应用，请改用二维码让另一台手机扫码</string>
+
+    <!-- 历史页上并排的「已看完」入口（它不在底栏五项里，见 Dest.Completed） -->
+    <string name="m_lib_open_completed">已看完</string>
+
+    <!-- 设置页授权状态区的退出登录 -->
+    <string name="m_settings_signout">退出登录</string>
+
+    <!-- 设置子页顶栏返回按钮的无障碍文案 -->
+    <string name="m_action_back">返回</string>
+
+    <!-- 设置 · 分类排序：首页 19 个分类的先后顺序。标题与描述由 SettingsSectionId 引用，
+         菜单页入口卡的摘要在下面 -->
+    <string name="m_settings_home_tabs_title">分类排序</string>
+    <string name="m_settings_home_tabs_desc">调整首页分类的先后顺序，第一个分类固定在最前</string>
+    <string name="m_settings_home_tabs_summary">按住把手拖动调整顺序</string>
+    <string name="m_home_tabs_pinned">固定</string>
+    <string name="m_home_tabs_move_up">上移</string>
+    <string name="m_home_tabs_move_down">下移</string>
+    <string name="m_home_tabs_drag_handle">拖动排序</string>
+    <string name="m_home_tabs_reset">恢复默认</string>
+    <string name="m_home_tabs_reset_title">恢复默认顺序？</string>
+    <string name="m_home_tabs_reset_message">首页分类会恢复成默认顺序，你调整过的排列将丢失。</string>
+    <string name="m_home_tabs_reset_confirm">恢复</string>
+</resources>

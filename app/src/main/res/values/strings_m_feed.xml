@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  T4（首页 / 搜索 / 详情 + 通用组件）在 TV 端文案之外新增的键。
+
+  规则（契约 §7）：T1 已把 TV 端所有 string 文件整份移植过来，已有的键不许重复定义，
+  这里只放手机端真的多出来的文案，一律 m_ 前缀。
+-->
+<resources>
+
+    <!-- 详情页简介的折叠开关：TV 端简介最多三行且不可展开（遥控器没有"点开一段文字"的习惯） -->
+    <string name="m_feed_desc_more">展开</string>
+    <string name="m_feed_desc_less">收起</string>
+
+    <!-- 收藏按钮的可见短标签：TV 端只有一个图标，手机上按钮带文字才不至于像装饰 -->
+    <string name="m_feed_fav_add">收藏</string>
+    <string name="m_feed_fav_remove">已收藏</string>
+
+    <!--
+      预告/花絮判定用词（详情页选集卡上的「预告」角标）。
+
+      它们是**上游片名标签的一部分**，不是界面文案——把词组放这里只为守住
+      「代码里不出现中文字面量」这条规则（契约 §1）；按 '|' 切开逐个做 contains 判断。
+      与 TV 端 DetailScreen.kt 的 TRAILER_KEYS 同一份清单、同一顺序。
+    -->
+    <!--
+      首页卡片的集数角标。数据来自 eps.meta 的 episode_all（总集数）与 video_num（已更到第几集）。
+      两者都缺时不画角标，所以这里只写「确实有数据」的两种说法。
+    -->
+    <string name="m_feed_episode_total">全 %1$d 集</string>
+    <string name="m_feed_episode_updated">更新至 %1$d 集</string>
+
+    <string name="m_feed_trailer_keywords">预告片|预告|花絮|彩蛋|片头|片尾|宣传片|片花|独家|幕后|采访|速看|前瞻</string>
+
+</resources>

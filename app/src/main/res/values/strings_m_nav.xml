@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 手机端底部导航栏的 3 个标签（首页 / 收藏 / 设置）。TV 端没有这条栏（它用左侧栏 + 遥控器），
+     所以这是一组全新的键，统一 m_nav_ 前缀，不与移植过来的 TV 键碰撞。
+     搜索与历史不在底栏（契约 §6）：它们由首页顶部工具栏压栈进入，那两处的图标与文案归 T4 的 strings_m_feed.xml。 -->
+<resources>
+    <string name="m_nav_home">首页</string>
+    <string name="m_nav_favorites">收藏</string>
+    <string name="m_nav_settings">设置</string>
+
+    <!-- 一级页按返回键：手机惯例是连按两次退出，第一次只提示（T3 壳自有） -->
+    <string name="m_nav_exit_hint">再按一次退出</string>
+</resources>

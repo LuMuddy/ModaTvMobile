@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  播放页投屏在 TV 端文案之外新增的键。
+  规则同 strings_m_feed.xml：T1 已移植的键不许重复定义，这里只放手机端真的多出来的文案，
+  一律 m_ 前缀。
+-->
+<resources>
+
+    <!-- 顶栏入口图标的 contentDescription 与面板标题共用一句 -->
+    <string name="m_player_cast_title">投屏</string>
+    <string name="m_player_cast_searching">正在搜索电视…</string>
+    <string name="m_player_cast_empty">没找到可投屏的设备，请确认手机与电视在同一 Wi-Fi</string>
+    <string name="m_player_cast_retry">重新搜索</string>
+    <string name="m_player_cast_connect">连接</string>
+    <string name="m_player_cast_connected">正在投屏到 %1$s</string>
+    <string name="m_player_cast_stop">停止投屏</string>
+    <string name="m_player_cast_failed">投屏失败，请确认电视支持 DLNA，或换一台电视试试</string>
+
+    <!-- 右下角簇的第四颗：把弹幕/比例/内核/解码/片头片尾收进去，不各占一颗常驻按钮 -->
+    <string name="m_player_more">更多</string>
+</resources>

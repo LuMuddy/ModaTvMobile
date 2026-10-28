@@ -1,0 +1,7 @@
+# 换行统一：源码走 LF，Windows 脚本必须留在 CRLF
+* text=auto eol=lf
+*.bat text eol=crlf
+gradlew text eol=lf
+*.jar binary
+*.png binary
+*.webp binary
