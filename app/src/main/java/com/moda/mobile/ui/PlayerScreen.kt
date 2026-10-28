@@ -118,6 +118,7 @@ import com.moda.mobile.ui.player.DecoderSheet
 import com.moda.mobile.ui.player.EpisodeSheet
 import com.moda.mobile.ui.player.MarksSheet
 import com.moda.mobile.ui.player.MoreSheet
+import com.moda.mobile.ui.player.PlaybackSession
 import com.moda.mobile.ui.player.PlayerEngine
 import com.moda.mobile.ui.player.PlayerEngines
 import com.moda.mobile.ui.player.PlayerErrorPane
@@ -266,7 +267,9 @@ private fun VideoSurface(
                 }
             },
             onRelease = {
-                it.player = null
+                // 引擎还归会话所有（退回详情页那一瞬间）就不要摘：小屏刚把同一个 ExoPlayer
+                // 绑到它自己的 PlayerView 上，这一摘会让小屏黑一帧到一秒——看起来正是"又在缓冲"
+                if (!PlaybackSession.isCurrent(engine)) it.player = null
                 capture.surfaceView = null
                 capture.textureView = null
             },
@@ -638,12 +641,33 @@ fun PlayerScreen(
     val hardware = wantedDecoder == DecoderMode.Hardware
 
     /**
-     * 引擎重建的 key：地址、重试次数、内核、软硬解。
-     * 后两个只能在构造时决定（Exo 的 MediaCodecSelector、IJK 的 mediacodec 选项都是 init 期写死）。
-     * 进度不会因此丢：onDispose 里先 flush 一次到 resumeFrom，新实例用它当 startMs。
+     * 当前集的身份：集数表里 index == currentEpisodeIndex 的那一集（与 [nextEpisode] 同一口径）。
+     * 只给会话判断"是不是同一集"用——同一 vid 换档位/换内核/回退 HLS/重试时，
+     * 会话据此从旧引擎现在的进度接着播，而不是回到调用方进页时算好的 startMs。
+     */
+    val currentEpisodeVid = remember(episodes, currentEpisodeIndex) {
+        episodes.firstOrNull { it.index == currentEpisodeIndex }?.vid.orEmpty()
+    }
+
+    /**
+     * 引擎来自 [PlaybackSession]（重建的 key 仍是：地址、重试次数、内核、软硬解；
+     * 后两个只能在构造时决定——Exo 的 MediaCodecSelector、IJK 的 mediacodec 选项都是 init 期写死）。
+     *
+     * 从详情页小屏点全屏过来时，那一格已经建好引擎并在播，这里拿到的是同一个实例：
+     * 会话不 start、不 seek，位置接着走——这就是"不再转圈"的落点。
+     * [resumeFrom] 只在会话真的新建引擎时才当 startMs 用。
      */
     val engine = remember(playUrl, attempt, effectiveCore, hardware) {
-        PlayerEngines.create(context, coreKeyOf(effectiveCore), hardware)
+        PlaybackSession.acquire(
+            context = context,
+            vid = currentEpisodeVid,
+            url = playUrl,
+            hls = useHls,
+            startMs = resumeFrom,
+            speed = settings.speed,
+            core = coreKeyOf(effectiveCore),
+            hardware = hardware,
+        )
     }
 
     /**
@@ -940,6 +964,14 @@ fun PlayerScreen(
     }
 
     DisposableEffect(engine) {
+        // 引用计数 +1：这一页正在显示它。归零后会话还有 800ms 宽限——
+        // 「播放页卸载 → 详情页小屏挂载」正是靠这段窗口不重建引擎
+        PlaybackSession.attach()
+        // 复用来的引擎（从详情页小屏过来）可能已经在播：状态先跟引擎对齐一次。
+        // 不这么做的话首帧会显示成"暂停 + 缓冲中"，直到下一次回调才纠正，
+        // 而这正好是用户第一眼看到的东西
+        setPlayingState(engine.isPlaying)
+        if (engine.isPlaying) setBufferingState(false)
         val listener = object : PlayerEngine.Listener {
             override fun onPlayingChanged(playing: Boolean) {
                 setPlayingState(playing)
@@ -980,15 +1012,20 @@ fun PlayerScreen(
             val dur = engine.durationMs
             if (last > 0L) resumeFrom = last
             onProgress(resumeFrom, dur)
-            // 先摘 listener 再 release：release 期间可能同步回调，那时本页可能已在销毁
-            engine.listener = null
-            engine.release()
+            // 只摘自己装的那一个 listener：退回详情页时小屏可能已经装上了它自己的，
+            // 直接置 null 会把对方的回调抹掉（两者挂载/卸载顺序不保证）
+            if (engine.listener === listener) engine.listener = null
+            // 不 release：引擎归会话，退回详情页时小屏还要用它接着播。
+            // 真释放发生在最后一次 detach 之后 800ms（彻底离开那条路）
+            PlaybackSession.detach()
         }
     }
 
+    // 起播已移交给 PlaybackSession.acquire（只有真的新建引擎才 start）：
+    // 复用同一集时这里再 start 一次，就等于从头拉第二遍流。
+    // 换集/换流时仍要复位"已播完"这个只属于本页的状态。
     LaunchedEffect(engine, playUrl) {
         ended = false
-        engine.start(playUrl, hls = useHls, startMs = resumeFrom, speed = settings.speed)
     }
 
     // 换内核 / 软硬解 / 切清晰度 / 回退 HLS / 重试都会重建引擎，新实例必须重新套上当前倍速
@@ -1474,6 +1511,9 @@ fun PlayerScreen(
                 modifier = Modifier.fillMaxSize(),
                 onRetry = {
                     playError = null
+                    // 出错的那台引擎状态不可靠，先让会话立刻丢掉它：
+                    // 否则下一次 acquire 因为地址没变会把它原样交回来，重试等于没重试
+                    PlaybackSession.discard()
                     attempt++
                 },
             )

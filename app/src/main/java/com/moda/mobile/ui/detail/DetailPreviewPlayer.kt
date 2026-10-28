@@ -80,8 +80,8 @@ import com.moda.mobile.ui.player.CastController
 import com.moda.mobile.ui.player.CastDevice
 import com.moda.mobile.ui.player.CastSheet
 import com.moda.mobile.ui.player.CastStatusChip
+import com.moda.mobile.ui.player.PlaybackSession
 import com.moda.mobile.ui.player.PlayerEngine
-import com.moda.mobile.ui.player.PlayerEngines
 import com.moda.mobile.ui.player.SpeedSheet
 import com.moda.mobile.ui.player.findActivity
 import com.moda.mobile.ui.player.formatClock
@@ -116,25 +116,24 @@ private const val LevelAutoHideMs = 800L
 /** 控件层无操作自动收起：与全屏播放页同一个 3 秒，用户不必学两套时序 */
 private const val ControlsAutoHideMs = 3000L
 
-/**
- * 底部控制条占的高度（44dp 按钮 + 上下内边距）。
- *
- * 右下角的全屏键要抬到这条之上，否则会和进度条末端的"总时长"叠在一起。
- * 与全屏页的 ControlsBottomInset 同一个思路：位置由高度常量算，不要在两头各写一个魔数。
- */
-private val ControlBarHeight = 66.dp
 
 /** 纵滑调的是亮度还是音量（判定用手势起点 x，见手势层注释） */
 private enum class LevelKind { Brightness, Volume }
 
 /**
- * 详情页顶部的小屏播放器：16:9、真的能播、盖一层常驻的四角控件。
+ * 详情页顶部的小屏播放器：16:9、真的能播、上下各一条贴边渐变带。
  *
- * 为什么四角按钮**常驻**而不是单击显隐：全屏播放页可以靠一行 OSD 把所有入口收起来，
- * 因为那里整屏就是播放器；这里只有 16:9 一格，把返回和全屏藏起来，用户下一次就找不到了。
- * 所以单击画面只做一件事——播放/暂停。
+ * 控件默认收起，**只有返回常驻**：这一格只有 16:9，把返回也藏起来用户下一次就找不到了。
+ * 其余入口（投屏/倍速、底部那一行）点一下画面才出现，3 秒无操作自动收起，面板开着时不收。
+ * 所以单击画面的语义是**显隐控制层**，不再兼做播放/暂停——播放/暂停是底行最左那颗按钮。
  *
- * 这里**没有**底部进度条、播放键、选集、清晰度/内核/解码/比例面板：那些是"换个屏幕看"的
+ * 两条带子都是整宽、贴卡片边缘、**无圆角无左右 margin**：圆角只来自卡片自己的 clip(14dp)。
+ * 背景是渐变而不是一块深色矩形——浮在画面里的深色块在片头黑底时会露出一条硬边，像贴纸。
+ *
+ * 底行 = 播放/暂停 · 当前时间 · 进度条 · 总时长 · 全屏。全屏**并在这行里**，不单独浮在画面中：
+ * 一颗浮块贴着进度条上方，在 16:9 的高度里两者都读不清。
+ *
+ * 这里**没有**选集、清晰度/内核/解码/比例面板：那些是"换个屏幕看"的
  * 需求，全屏页已经有一份；小屏再摆一套，两边的规则会各自演进（尤其档位与内核覆盖）。
  * 小屏也不写历史、不判 [com.moda.mobile.data.local.IntroOutroRules] 的片头片尾——
  * 进度始终只由全屏播放页负责，否则同一部剧会有两个写者。
@@ -154,7 +153,7 @@ fun DetailPreviewPlayer(
     loading: Boolean,
     /** VM 侧的错误码（换直链失败）：文案走 [appErrorText] */
     error: AppError?,
-    /** 小屏在播第几集（0 起下标）：标题行与全屏按钮都用它 */
+    /** 小屏在播第几集（0 起下标）：只喂投屏元数据的「标题 · 第 N 集」，覆盖层不画标题 */
     episodeIndex: Int,
     onRetry: () -> Unit,
     onBack: () -> Unit,
@@ -200,11 +199,27 @@ fun DetailPreviewPlayer(
     var scrubMs by remember { mutableLongStateOf(0L) }
 
     /**
-     * 引擎重建的 key：地址与重试次数。换地址必须换引擎——PlayerEngine 的 start 是"起播"，
-     * 不是"换源"；同一实例上换源会把上一段缓冲一起带进来。
+     * 引擎来自 [PlaybackSession]，不再由本组件自己 new：点全屏后这一格被拆掉、播放页挂载，
+     * 两边共用同一个引擎，画面不重新起播、不重新缓冲。
+     *
+     * 重建的 key 仍是「地址 + 重试次数」：换地址必须换引擎——PlayerEngine 的 start 是"起播"，
+     * 不是"换源"；同一实例上换源会把上一段缓冲一起带进来。重试则先 discard() 再 ++，见错误面板。
+     * 小屏拿不到 vid（DetailPreview 只带地址），会话按「去掉 vkey 的地址」认身份，
+     * 播放页那边同一条规则，所以同一集能对上。
      */
     val engine: PlayerEngine? = remember(playUrl, attempt) {
-        if (playUrl.isBlank()) null else PlayerEngines.create(context, "exo", true)
+        if (playUrl.isBlank()) {
+            null
+        } else {
+            PlaybackSession.acquire(
+                context = context,
+                vid = "",
+                url = playUrl,
+                hls = useHls,
+                startMs = 0L,
+                speed = speed,
+            )
+        }
     }
 
     // —— 投屏 ——
@@ -287,7 +302,13 @@ fun DetailPreviewPlayer(
 
     DisposableEffect(engine) {
         val e = engine ?: return@DisposableEffect onDispose { }
-        e.listener = object : PlayerEngine.Listener {
+        // 引用计数 +1：现在这一格在显示它。归零不代表立刻释放——会话留 800ms 宽限，
+        // 正好覆盖「详情页卸载 → 播放页挂载」这段交替
+        PlaybackSession.attach()
+        // 复用来的引擎可能已经在播（从播放页返回）：状态先跟引擎对齐一次，
+        // 否则底行那颗按钮会一直显示成"播放中"的反面，直到下一次回调才纠正
+        setPlayingState(e.isPlaying)
+        val listener = object : PlayerEngine.Listener {
             override fun onPlayingChanged(playing: Boolean) {
                 setPlayingState(playing)
             }
@@ -309,16 +330,19 @@ fun DetailPreviewPlayer(
                 // 画面按 16:9 外框 FIT 缩放，这里不需要额外动作
             }
         }
+        e.listener = listener
         onDispose {
-            // 先摘 listener 再 release：release 期间可能同步回调，那时这一格可能已在销毁。
-            // 这一步就是"离开详情页必须停声"的落点：引擎实例只活在这次组合里
-            e.listener = null
-            e.release()
+            // 只摘自己装的那一个 listener：切换时播放页可能已经把它自己的装上了，
+            // 直接置 null 会把对方的回调抹掉（两者挂载/卸载顺序不保证）
+            if (e.listener === listener) e.listener = null
+            // 不 release：引擎归会话，切到播放页时它还要接着播。
+            // 真释放发生在最后一次 detach 之后 800ms（回首页那条路）
+            PlaybackSession.detach()
         }
     }
 
     // 切后台必须停声：详情页不是播放页，没有"切走了还想听"的场景。
-    // 这里只 pause 不 release——真正的 release 归上面那个 DisposableEffect
+    // 这里只 pause 不 release——真正的 release 归 PlaybackSession（引用归零 800ms 后）
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, engine) {
         val observer = LifecycleEventObserver { _, event ->
@@ -342,11 +366,8 @@ fun DetailPreviewPlayer(
         }
     }
 
-    LaunchedEffect(engine, playUrl) {
-        val e = engine ?: return@LaunchedEffect
-        if (playUrl.isBlank()) return@LaunchedEffect
-        e.start(playUrl, hls = useHls, startMs = 0L, speed = speed)
-    }
+    // 起播已移交给 PlaybackSession.acquire（只有真的新建引擎才 start）：
+    // 复用同一集时必须什么都不做，否则这里一 start 就又从 0 拉一次流。
 
     // 换引擎、换倍速都套一次：新实例的默认倍速是 1f
     LaunchedEffect(engine, speed) {
@@ -475,7 +496,12 @@ fun DetailPreviewPlayer(
 
             engineErrorText != null -> PreviewPlaceholder(
                 message = engineErrorText,
-                onRetry = { attempt++ },
+                // 出错的那台引擎状态不可靠，先让会话立刻丢掉它：
+                // 否则下一次 acquire 因为地址没变会把它原样交回来，重试等于没重试
+                onRetry = {
+                    PlaybackSession.discard()
+                    attempt++
+                },
                 modifier = Modifier.fillMaxSize(),
             )
 
@@ -565,24 +591,32 @@ fun DetailPreviewPlayer(
             )
         }
 
-        // 3) 左上角：只有返回一颗，而且**常驻**——控件层收起时它是这一格唯一的出口，
-        //    藏起来用户下一次就找不到了（这也是唯一不参与显隐的控件）。
-        //    片名不在这里：标题已经挪到页面内容里（播放器下方），覆盖层不再叠文字。
-        CornerIcon(
-            icon = Icons.AutoMirrored.Filled.ArrowBack,
-            description = stringResource(R.string.search_back),
-            onClick = onBack,
-            modifier = Modifier.align(Alignment.TopStart).padding(start = 4.dp, top = 8.dp),
-        )
-
-        // 4) 右上角：投屏 + 倍速（间距 8dp）。投屏中额外挂一条「正在投屏到 X」——
-        //    投到电视之后手机是黑的，不写出来用户没法确认自己投成功了没有
-        if (controlsVisible) {
-            Row(
-                Modifier.align(Alignment.TopEnd).padding(6.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+        // 3) 顶部控制带：整宽、贴卡片边缘、**无圆角无左右 margin**。
+        //    背景是自上而下收黑的渐变（0xCC000000 → 全透明）：不是一块浮在画面上的深色贴纸，
+        //    而是画面自己暗下去——片头黑底时看不出边界，正是"融进画面"。
+        //    唯一的不圆角来源是卡片自己的 clip(14dp)，所以两端会被圆角自然裁掉。
+        //    返回**常驻**（控件层收起时它是这一格唯一的出口）；投屏/倍速随控件层显隐，
+        //    但两者同一个 Row，带宽恒定——显隐时高度不跳。
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .align(Alignment.TopCenter)
+                .background(
+                    Brush.verticalGradient(listOf(Color(0xCC000000), Color(0x00000000))),
+                )
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CornerIcon(
+                icon = Icons.AutoMirrored.Filled.ArrowBack,
+                description = stringResource(R.string.search_back),
+                onClick = onBack,
+            )
+            Spacer(Modifier.weight(1f))
+            if (controlsVisible) {
+                // 投屏中额外挂一条「正在投屏到 X」：投到电视之后手机是黑的，
+                // 不写出来用户没法确认自己投成功了没有
                 casting?.let { device ->
                     CastStatusChip(deviceName = device.friendlyName, modifier = Modifier.widthIn(max = 132.dp))
                 }
@@ -603,95 +637,98 @@ fun DetailPreviewPlayer(
             }
         }
 
-        // 5) 右下角：全屏一颗——进既有播放页播"小屏正在播的这一集"。
-        //    它和底部进度条都排在底部，所以两者都在控制层里：收起时整块底部让给画面
-        if (controlsVisible) {
-            CornerIcon(
-                icon = Icons.Filled.Fullscreen,
-                description = stringResource(R.string.danmaku_region_full),
-                onClick = onEnterFullscreen,
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(end = 6.dp, bottom = ControlBarHeight + 6.dp),
-            )
-        }
-
-        // 6) 底部控制条：播放/暂停 + 当前时间 + 进度 + 总时长，一条 3dp 细轨。
-        //    只在控制层展开时出现；背景是自下而上的渐变而不是整条压黑——这一格本来就小，
-        //    一整块黑底会把画面切掉一条。
+        // 4) 底部控制带：整宽、贴卡片边缘、无圆角无 margin（圆角只来自卡片 clip(14dp)），
+        //    背景自下而上收黑（全透明 → 0xE6000000）。
+        //    一行排完：播放/暂停 · 当前时间 · 进度条 · 总时长 · 全屏。
+        //    全屏**并进这一行**而不是浮在画面里：它原本紧贴在进度条上方，两条虚线一样近，
+        //    挤在 16:9 的那点高度上谁都读不清；进来之后右侧只有 12dp 内边距。
         if (controlsVisible) {
             val maxMs = durationMs.coerceAtLeast(1L)
             val shownMs = if (scrubbing) scrubMs else positionMs
-            Column(
+            Row(
                 Modifier
-                    .align(Alignment.BottomCenter)
                     .fillMaxWidth()
+                    .align(Alignment.BottomCenter)
                     .background(
-                        Brush.verticalGradient(
-                            listOf(Color(0x00000000), Color(0xCC000000), Color(0xE6000000)),
-                        ),
+                        Brush.verticalGradient(listOf(Color(0x00000000), Color(0xE6000000))),
                     )
-                    .padding(start = 12.dp, end = 12.dp, top = 14.dp, bottom = 8.dp),
+                    .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
             ) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
+                // 播放/暂停：与全屏页一样是"控制层里的第一颗"，不再是单击画面的语义
+                Box(
+                    Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .clickable {
+                            togglePlay()
+                            touchControls()
+                        },
+                    contentAlignment = Alignment.Center,
                 ) {
-                    // 播放/暂停：与全屏页一样是"控制层里的第一颗"，不再是单击画面的语义
-                    Box(
-                        Modifier
-                            .size(44.dp)
-                            .clip(CircleShape)
-                            .clickable {
-                                togglePlay()
-                                touchControls()
-                            },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            imageVector = if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                            // 与全屏页底栏同一条约定：这颗图标不单独写描述，时长与进度紧挨着它
-                            contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.size(26.dp),
-                        )
-                    }
-                    Spacer(Modifier.width(2.dp))
-                    Text(
-                        text = formatClock(shownMs),
-                        style = ModaType.Caption,
-                        color = Color.White,
-                        maxLines = 1,
+                    Icon(
+                        imageVector = if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                        // 与全屏页底栏同一条约定：这颗图标不单独写描述，时长与进度紧挨着它
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(26.dp),
                     )
-                    Slider(
-                        value = shownMs.coerceIn(0L, maxMs).toFloat(),
-                        valueRange = 0f..maxMs.toFloat(),
-                        // 拖：只更新预览值（shownMs 走 scrubMs），并重置收起计时
-                        onValueChange = { value ->
-                            scrubbing = true
-                            scrubMs = value.toLong()
-                            touchControls()
-                        },
-                        // 松手才 seek：拖动中每帧 seek 会把播放器拖死（与全屏页同规矩）
-                        onValueChangeFinished = {
-                            engine?.seekTo(scrubMs)
-                            positionMs = scrubMs
-                            scrubbing = false
-                            touchControls()
-                        },
-                        modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
-                    )
-                    Text(
-                        text = formatClock(durationMs),
-                        style = ModaType.Caption,
-                        color = Color.White,
-                        maxLines = 1,
+                }
+                // 时间文字给最小宽度 + 居中：0:07 → 1:02:07 时宽度变化不会让整行抖一下
+                Text(
+                    text = formatClock(shownMs),
+                    style = ModaType.Caption,
+                    color = Color.White,
+                    maxLines = 1,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.widthIn(min = 44.dp),
+                )
+                Slider(
+                    value = shownMs.coerceIn(0L, maxMs).toFloat(),
+                    valueRange = 0f..maxMs.toFloat(),
+                    // 拖：只更新预览值（shownMs 走 scrubMs），并重置收起计时
+                    onValueChange = { value ->
+                        scrubbing = true
+                        scrubMs = value.toLong()
+                        touchControls()
+                    },
+                    // 松手才 seek：拖动中每帧 seek 会把播放器拖死（与全屏页同规矩）
+                    onValueChangeFinished = {
+                        engine?.seekTo(scrubMs)
+                        positionMs = scrubMs
+                        scrubbing = false
+                        touchControls()
+                    },
+                    // 仍是唯一的可伸缩元素：多了全屏一颗之后也不许把进度条挤没
+                    modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
+                )
+                Text(
+                    text = formatClock(durationMs),
+                    style = ModaType.Caption,
+                    color = Color.White,
+                    maxLines = 1,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.widthIn(min = 44.dp),
+                )
+                // 全屏：行尾一颗，44dp 触控区 / 22dp 图标，与行内其它元素同一条中线
+                Box(
+                    Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .clickable(onClick = onEnterFullscreen),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.Fullscreen,
+                        contentDescription = stringResource(R.string.danmaku_region_full),
+                        tint = Color.White,
+                        modifier = Modifier.size(22.dp),
                     )
                 }
             }
         }
 
-        // 7) 缓冲指示：首帧还没出来时给一个细环，免得这一格看起来就是坏了
+        // 5) 缓冲指示：首帧还没出来时给一个细环，免得这一格看起来就是坏了
         if (interactive && buffering && !playing) {
             CircularProgressIndicator(
                 modifier = Modifier.align(Alignment.Center).size(22.dp),
@@ -700,12 +737,12 @@ fun DetailPreviewPlayer(
             )
         }
 
-        // 8) 纵滑指示：图标 + 百分比，松手 800ms 后收掉
+        // 6) 纵滑指示：图标 + 百分比，松手 800ms 后收掉
         levelKind?.let { kind ->
             LevelIndicator(kind = kind, value = levelValue, modifier = Modifier.fillMaxSize())
         }
 
-        // 9) 两块面板。PlayerSheet 用的是 ModalBottomSheet（挂在窗口上），
+        // 7) 两块面板。PlayerSheet 用的是 ModalBottomSheet（挂在窗口上），
         //    所以放进这一格里也不会被 16:9 的圆角裁掉
         if (castSheetVisible) {
             CastSheet(
@@ -757,7 +794,9 @@ private fun VideoSurface(engine: PlayerEngine, modifier: Modifier = Modifier) {
             it.player = exoPlayerOf(engine)
             it.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
         },
-        onRelease = { it.player = null },
+        // 引擎还归会话所有（切到播放页那一瞬间）就不要摘：播放页刚把同一个 ExoPlayer
+        // 绑到它自己的 PlayerView 上，这一摘会让新画面黑一帧到一秒——看起来正是"又在缓冲"
+        onRelease = { if (!PlaybackSession.isCurrent(engine)) it.player = null },
         modifier = modifier,
     )
 }
