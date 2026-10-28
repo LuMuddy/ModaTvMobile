@@ -12,5 +12,5 @@ dependencyResolutionManagement {
         mavenCentral()
     }
 }
-rootProject.name = "ModaMobile"
+rootProject.name = "ModaTvMobile"
 include(":app")

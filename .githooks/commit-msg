@@ -1,0 +1,44 @@
+#!/bin/bash
+# Conventional Commits 校验（英文 type/scope + 中文描述）
+# 安装：git config core.hooksPath .githooks
+set -euo pipefail
+
+MSG_FILE="$1"
+SUBJECT=$(grep -vE '^[[:space:]]*#' "$MSG_FILE" | sed '/^[[:space:]]*$/d' | head -n1)
+
+case "$SUBJECT" in
+  "Merge "*|"Revert "*|fixup*|squash*|amend*) exit 0 ;;
+esac
+
+TYPES="feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert"
+PATTERN="^($TYPES)(\([a-z0-9]+\))?!?: .+$"
+TYPE_LIST=$(echo "$TYPES" | tr "|" " ")
+
+fail() {
+  echo "" >&2
+  echo "✗ 提交信息不符合规范：" >&2
+  echo "    $SUBJECT" >&2
+  echo "" >&2
+  echo "  期望格式：<type>(<scope>): <中文描述>" >&2
+  echo "  type：  $TYPE_LIST" >&2
+  echo "  示例：  fix(player): 修复倍速切换后画面卡顿" >&2
+  echo "  详情见：CONTRIBUTING.md" >&2
+  echo "" >&2
+  exit 1
+}
+
+if [ -z "$SUBJECT" ]; then
+  echo "✗ 提交信息为空" >&2
+  exit 1
+fi
+
+echo "$SUBJECT" | grep -qE "$PATTERN" || fail
+
+LEN=$(printf '%s' "$SUBJECT" | wc -m | tr -d ' ')
+[ "$LEN" -le 72 ] || { echo "✗ 标题过长（$LEN > 72 字符）：$SUBJECT" >&2; exit 1; }
+
+case "$SUBJECT" in
+  *。|*.) echo "✗ 标题结尾不要加句号" >&2; exit 1 ;;
+esac
+
+exit 0
