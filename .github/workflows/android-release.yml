@@ -1,0 +1,282 @@
+name: Release APK (Mobile)
+
+# 与 TV 端 .github/workflows/android-release.yml 同一条流水线，差异都在手机端特有的地方：
+# 版本号算法、asset 名、以及多挂一份 version-mobile.json。这里不挂 TV 的 version.json——
+# 手机端客户端只读 version-mobile.json，挂错了它只会静默认为「已是最新」。
+#
+# 触发方式只有两种：推 v* 标签（发版）或在 Actions 页面手动点一次（试跑）。
+# 手动试跑不建 Release、不发资产，只留 artifact。
+#
+# 需要的仓库 Secret（Settings → Secrets and variables → Actions）：
+#   KEYSTORE_BASE64 / KEYSTORE_PASSWORD / KEY_ALIAS / KEY_PASSWORD
+# 缺 KEYSTORE_BASE64 直接失败，不静默产出装不上的未签名包。
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write # softprops/action-gh-release 要写 Release
+
+concurrency:
+  group: release-mobile-${{ github.ref }}
+  cancel-in-progress: false # 发版构建被打断比排队更糟
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 供「按 tag 序号算 versionCode」与「生成发版说明」两处使用：
+      # 浅克隆里没有历史和 tag，git tag --sort=v:refname 是空表。
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # AGP 8.9 要求 JDK 17；ubuntu-latest 自带的 JDK 版本会变，显式钉住。
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+          gradle-home-cache-cleanup: true
+
+      # action 管的依赖缓存不含 build-cache-1，这里把 Gradle 构建缓存单独挂出来：
+      # 源码没动的任务复用上次产物。key 带 sha，restore-keys 兜底最近一份。
+      - uses: actions/cache@v4
+        with:
+          path: ~/.gradle/caches/build-cache-1
+          key: gradle-build-cache-${{ github.sha }}
+          restore-keys: |
+            gradle-build-cache-
+
+      # 不用 android-actions/setup-android：TV 端 v1.0.1 那次 CI 就死在它那一步
+      # （job 记录第 4 步 failure、之后全 skipped）。ubuntu-latest 自带 Android SDK
+      # （ANDROID_HOME 已设、cmdline-tools 在 PATH），直接用 sdkmanager 装组件，
+      # 就少一个会随 runner 升级悄悄失效的第三方 action。
+      - name: 安装 SDK 组件
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+          [ -n "$SDK" ] || { echo "::error::runner 没有 ANDROID_HOME，镜像变了？"; exit 1; }
+          SDKMGR="$(command -v sdkmanager || true)"
+          if [ -z "$SDKMGR" ]; then
+            SDKMGR="$(ls "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | sort -V | tail -n 1)"
+          fi
+          [ -n "$SDKMGR" ] || { echo "::error::找不到 sdkmanager"; exit 1; }
+          # yes | ... 被 SIGPIPE 收尾，pipefail 下管道会以 141 结束，必须显式兜住
+          ( yes | "$SDKMGR" --sdk_root="$SDK" --licenses > /dev/null ) || true
+          "$SDKMGR" --sdk_root="$SDK" "platforms;android-35" "build-tools;35.0.0"
+
+      # 签名材料统一走 local.properties（和本地开发同一条注入路径），
+      # 不在 build.gradle.kts 里另开一条环境变量通道：两套来源迟早会分叉。
+      # 键名前缀是 moda.（TV 端是 modatv.），两端的 local.properties 不会互相串。
+      # runner 用完即弃，这份文件不会进入任何提交或 artifact。
+      - name: 写入 local.properties
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_BASE64:-}" ]; then
+            echo "::error::缺少 secret KEYSTORE_BASE64，请在仓库 Settings → Secrets and variables → Actions 里配置"
+            exit 1
+          fi
+          echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.jks"
+          : > local.properties
+          write_prop() { printf '%s=%s\n' "$1" "$2" >> local.properties; }
+          write_prop moda.keystoreFile "$RUNNER_TEMP/release.jks"
+          write_prop moda.keystorePassword "$KEYSTORE_PASSWORD"
+          write_prop moda.keyAlias "$KEY_ALIAS"
+          write_prop moda.keyPassword "$KEY_PASSWORD"
+
+      # 版本号只在这里算一次：构建用它、校验签名用它、asset 名也用它。
+      - name: 计算版本号
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            # 客户端（data/UpdateSource.kt）拿版本号直接拼 APK 直链，
+            # 形态不对它不报错、只会静默认为「已是最新」，所以这里硬拦。
+            if ! printf '%s' "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::tag 必须是 vX.Y.Z（形如 v1.0.0），当前是 $GITHUB_REF_NAME"
+              exit 1
+            fi
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            # 手动试跑没有 tag，基准版本从仓库里最新的 tag 推：v1.0.0 → 1.0.0-dev.<run number>。
+            BASE_TAG="$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)"
+            if ! printf '%s' "$BASE_TAG" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::推不出基准版本（最新 tag：${BASE_TAG:-<none>}），请检查 clone 是否带了 tag"
+              exit 1
+            fi
+            VERSION="${BASE_TAG}-dev.${GITHUB_RUN_NUMBER}"
+          fi
+          BASE="${VERSION%%-*}"
+          # versionCode = 该版本在 tag 版本序里的序号：v1.0.0 → 1、v1.0.1 → 2。
+          # 与 app/build.gradle.kts 的本地默认值 1 对齐（首版 1 / 1.0.0）。
+          # 不用提交数、不用 run number：两者都没法在仓库里按 tag 复算，
+          # 而 versionCode 一旦退回去，装着线上包的设备就是降级安装、系统直接拒绝。
+          TAGS="$(git tag --list 'v[0-9]*' --sort=v:refname)"
+          VCODE="$(printf '%s\n' "$TAGS" | grep -nx -e "v$BASE" | cut -d: -f1 || true)"
+          if [ -z "$VCODE" ]; then
+            echo "::error::tag v$BASE 不在仓库 tag 列表里，无法定位版本号"
+            exit 1
+          fi
+          # 序号只在 tag 按版本序递增时才等于「第几次发版」。乱序打 tag 会让号倒退，
+          # 这里直接拦下：要求当前 tag 是版本序里最大的那个。
+          LAST="$(printf '%s\n' "$TAGS" | tail -n 1)"
+          if [ "v$BASE" != "$LAST" ]; then
+            echo "::error::v$BASE 不是版本序里最新的 tag（最新为 $LAST），版本号会倒退"
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "VCODE=$VCODE" >> "$GITHUB_ENV"
+          echo "版本：$VERSION（versionCode $VCODE）"
+
+      - name: 构建 release APK
+        run: |
+          set -euo pipefail
+          ./gradlew --no-daemon --build-cache assembleRelease \
+            "-Pmoda.versionName=$VERSION" \
+            "-Pmoda.versionCode=$VCODE"
+
+      # 签名配置在本地是可选的（没密钥也要能编），所以这里必须验：
+      # 没有这一步，缺 secrets 时会静默产出一个装不上的 unsigned 包，而 Release 照发不误。
+      # 产物名由 app/build.gradle.kts 的 outputFileName 定死成 ModaMobile<版本>.apk，
+      # 未签名包也是这个名字，所以「文件名对不对」只回答「构建出没出包」。
+      - name: 校验签名
+        run: |
+          set -euo pipefail
+          APK="app/build/outputs/apk/release/ModaMobile${VERSION}.apk"
+          if [ ! -f "$APK" ]; then
+            echo "::error::没有生成 $APK，实际产物："
+            ls -l app/build/outputs/apk/release/ || true
+            exit 1
+          fi
+          APKSIGNER="$(ls "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -n 1)"
+          "$APKSIGNER" verify --print-certs "$APK"
+
+      # 不用 action 的 generate_release_notes：它只列**合并的 PR**，而本仓库是直接 push
+      # 到 master，生成出来只剩一行 "Full Changelog"。改成自己从上一个 tag 起列提交标题。
+      # 只写纯文本：同一份正文既要显示在 Release 页面，也要经 UpdateSource.stripHtml
+      # 显示在手机的更新弹窗里，带 # 和 [](url) 会很怪。
+      - name: 生成发版说明
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          # 手写优先：docs/release-notes/<tag>.md 存在就直接用它。
+          if [ -f "docs/release-notes/$GITHUB_REF_NAME.md" ]; then
+            cp "docs/release-notes/$GITHUB_REF_NAME.md" RELEASE_NOTES.md
+            cat RELEASE_NOTES.md
+            exit 0
+          fi
+          PREV="$(git tag --sort=-creatordate | grep -vx "$GITHUB_REF_NAME" | head -n 1 || true)"
+          if [ -n "$PREV" ]; then
+            RANGE="$PREV..$GITHUB_SHA"
+            FOOT="完整对比：https://github.com/$GITHUB_REPOSITORY/compare/${PREV}...${GITHUB_REF_NAME}"
+          else
+            RANGE="$GITHUB_SHA"
+            FOOT="全部提交：https://github.com/$GITHUB_REPOSITORY/commits/$GITHUB_REF_NAME"
+          fi
+          {
+            echo "$GITHUB_REF_NAME"
+            echo
+            # ci / docs / style / test 是维护者视角的噪音，用户只关心能用上什么
+            git log --no-merges --max-count=30 --pretty='- %s' "$RANGE" \
+              | grep -Ev '^- (ci|docs|style|test)(\(|:)' || true
+            echo
+            echo "$FOOT"
+          } > RELEASE_NOTES.md
+          cat RELEASE_NOTES.md
+
+
+      # version-mobile.json 是手机端自更新的唯一票据（data/UpdateSource.kt 只读它）。
+      # 字段与客户端解析一一对应：versionName 不带前导 v、versionCode 就是本次构建的号、
+      # files 为空数组会被客户端判成「没有可下载的东西」，所以必须写上 APK 的名字。
+      # notes 直接用上面那份正文：客户端会 stripHtml，纯文本原样上屏。
+      - name: 生成 version-mobile.json
+        if: github.ref_type == 'tag'
+        run: |
+          set -euo pipefail
+          VERSION="$VERSION" VCODE="$VCODE" APK_NAME="ModaMobile${VERSION}.apk" python3 - <<'PY'
+          import json, os
+          notes = ""
+          try:
+              with open("RELEASE_NOTES.md", encoding="utf-8") as f:
+                  notes = f.read()
+          except FileNotFoundError:
+              pass
+          data = {
+              "versionName": os.environ["VERSION"],
+              "versionCode": int(os.environ["VCODE"]),
+              "notes": notes,
+              "files": [{"name": os.environ["APK_NAME"]}],
+          }
+          with open("version-mobile.json", "w", encoding="utf-8") as f:
+              json.dump(data, f, ensure_ascii=False, indent=2)
+          PY
+          cat version-mobile.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ModaMobile-apk
+          path: |
+            app/build/outputs/apk/release/ModaMobile*.apk
+            version-mobile.json
+          if-no-files-found: error
+
+      - name: 发布到 GitHub Release
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          # 名字必须是 tag 本身：客户端拿 version-mobile.json 的版本名拼
+          # /releases/download/v<版本>/ModaMobile<版本>.apk，tag 形态在算版本号那步已拦过。
+          name: ${{ github.ref_name }}
+          files: |
+            app/build/outputs/apk/release/ModaMobile*.apk
+            version-mobile.json
+
+      # 正文不用 action 的 body_path：实测更新一个**已存在**的 release 时它不覆盖正文
+      # （TV 端 v1.0.2 重发那次资产换了、正文还是旧的），所以这里自己 PATCH 一次。
+      - name: 写入发版说明
+        if: github.ref_type == 'tag'
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          API="https://api.github.com/repos/$GITHUB_REPOSITORY/releases"
+          python3 -c 'import json;print(json.dumps({"body":open("RELEASE_NOTES.md",encoding="utf-8").read()}))' > /tmp/body.json
+
+          code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X PATCH \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "$API/tags/$GITHUB_REF_NAME" -d @/tmp/body.json || echo 000)
+          echo "按 tag 改正文：HTTP $code"
+
+          if [ "$code" != "200" ]; then
+            # tag 被删过又重推时 releases/tags/<tag> 可能找不到，退回按 id 改
+            RID=$(curl -sS -H "Authorization: Bearer $TOKEN" -H "Accept: application/vnd.github+json" \
+              "$API?per_page=30" | python3 -c 'import json,os,sys
+          tag = os.environ["GITHUB_REF_NAME"]
+          print(next((r["id"] for r in json.load(sys.stdin) if r["tag_name"] == tag), ""))' || true)
+            echo "按 tag 找不到时，列表里的 release id：${RID:-<none>}"
+            if [ -n "${RID:-}" ]; then
+              code=$(curl -sS -o /tmp/resp.json -w '%{http_code}' -X PATCH \
+                -H "Authorization: Bearer $TOKEN" \
+                -H "Accept: application/vnd.github+json" \
+                "$API/$RID" -d @/tmp/body.json || echo 000)
+              echo "按 id 改正文：HTTP $code"
+            fi
+          fi
+
+          # 失败时把服务端的话打成 annotation：它能在 API 里读到，不必翻日志
+          if [ "$code" != "200" ]; then
+            echo "::error::写入发版说明失败 HTTP $code"
+            python3 -c 'print(open("/tmp/resp.json",encoding="utf-8").read()[:400])' || true
+            exit 1
+          fi
+
