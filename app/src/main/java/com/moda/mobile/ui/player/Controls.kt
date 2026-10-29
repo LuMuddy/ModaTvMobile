@@ -424,12 +424,15 @@ fun PlayerTopBar(
                     modifier = Modifier.widthIn(max = 200.dp).padding(end = 8.dp),
                 )
             }
-            // 投屏入口：投屏中图标换主色（实心圆底也跟着提亮），一眼看出「现在在电视上放」
+            // 投屏入口：**不挂常驻圆形半透明底**。顶栏本来就已经压了一层自上而下的黑渐变，
+            // 圆底再叠两块就是画面上多两个补丁（用户明确不要）。
+            // 状态只靠 tint 表达：投屏中换主色，其余一律白。
+            // 命中区仍是 SheetTitleHeight 的方块（≥44dp），去掉底色不影响点击面积；
+            // clip 留着只是为了让 ripple 走圆形，不是装饰。
             Box(
                 Modifier
                     .size(SheetTitleHeight)
                     .clip(CircleShape)
-                    .background(if (casting) ModaColors.Accent.copy(alpha = 0.22f) else Color(0x33FFFFFF))
                     .clickable(onClick = onCastClick),
                 contentAlignment = Alignment.Center,
             ) {
@@ -440,19 +443,19 @@ fun PlayerTopBar(
                 )
             }
             Spacer(Modifier.width(4.dp))
-            // 锁定态给一个实心圆底 + 实心锁形：比单纯换 tint 更容易一眼看出「现在是锁着的」
+            // 锁定同理：没有圆底，锁没锁靠**图标形状**（LockOpen ↔ Lock）+ 主色区分——
+            // 这比一个实心圆底更容易读，也不会在画面上留下色块。
             Box(
                 Modifier
                     .size(SheetTitleHeight)
                     .clip(CircleShape)
-                    .background(if (locked) ModaColors.Accent else Color(0x33FFFFFF))
                     .clickable(onClick = onToggleLock),
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(
                     imageVector = if (locked) Icons.Filled.Lock else Icons.Filled.LockOpen,
                     contentDescription = null,
-                    tint = Color.White,
+                    tint = if (locked) ModaColors.Accent else Color.White,
                 )
             }
         }
