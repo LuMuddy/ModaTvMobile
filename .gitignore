@@ -38,3 +38,6 @@ captures/
 
 # Logs
 *.log
+
+# Signing key material (whole dir)
+/keys/
