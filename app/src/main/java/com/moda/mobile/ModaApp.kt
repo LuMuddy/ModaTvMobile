@@ -3,6 +3,8 @@ package com.moda.mobile
 import android.app.Application
 import com.moda.mobile.data.Api
 import com.moda.mobile.data.Auth
+import com.moda.mobile.crash.CrashHandler
+import com.moda.mobile.crash.CrashLog
 import com.moda.mobile.data.local.AuthSessionStoreImpl
 import com.moda.mobile.data.local.DeviceFingerprint
 import kotlinx.coroutines.runBlocking
@@ -19,6 +21,13 @@ class ModaApp : Application() {
      */
     override fun onCreate() {
         super.onCreate()
+        // 崩溃采集必须是第一件事：下面这些启动早期的读写（指纹、DataStore、网络层注入）
+        // 恰恰是最容易在个别 ROM 上抛异常的一段，处理器装晚了就一条日志都留不下。
+        // :crash 进程也会走到这里，install 内部用 CAS 防了重复安装，不会套成多层处理器。
+        //
+        // 只有拿到存储权限才装：没权限时这套功能整个不存在——不写日志、不弹崩溃页，
+        // 崩溃直接交给系统默认处理器（用户看到的就是系统那句"已停止运行"）。
+        if (CrashLog.permitted(this)) CrashHandler.install(this)
         // 指纹先就位：兑换授权码时它是请求里唯一的身份，晚一步就是一个空指纹的请求
         Api.FP = DeviceFingerprint.of(this)
         val store = AuthSessionStoreImpl.create(this)

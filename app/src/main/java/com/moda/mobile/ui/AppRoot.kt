@@ -63,6 +63,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.moda.mobile.BuildConfig
 import com.moda.mobile.R
+import com.moda.mobile.crash.CrashReporter
 import com.moda.mobile.data.Repo
 import com.moda.mobile.data.local.CopyrightNoticeStoreImpl
 import com.moda.mobile.data.local.SearchHistoryStoreImpl
@@ -71,7 +72,9 @@ import com.moda.mobile.ui.components.appErrorText
 import com.moda.mobile.ui.player.PlaybackSession
 import com.moda.mobile.ui.theme.ModaColors
 import com.moda.mobile.ui.theme.ModaType
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * 全应用唯一入口：先过授权门，再按栈顶渲染。
@@ -757,11 +760,24 @@ private fun SettingsGroupRoute(
             onClearCompleted = vm::clearCompleted,
             onClearAuth = vm::signOut,
         )
-        SettingsSectionId.About -> AboutSettingsSection(
-            onOpenCopyright = onOpenCopyright,
-            updateUi = vm.updateUi,
-            onCheckUpdate = { vm.checkUpdate(manual = true) },
-        )
+        SettingsSectionId.About -> {
+            // 崩溃日志条数每次进这一页现数一次：上报成功后要**立刻**消失，
+            // 等下一次冷启动才隐藏等于没做（这一行的显示条件就是"有日志"）
+            val appContext = LocalContext.current.applicationContext
+            var crashLogCount by remember { mutableStateOf(0) }
+            LaunchedEffect(Unit) {
+                crashLogCount = withContext(Dispatchers.IO) { CrashReporter.logFiles(appContext).size }
+            }
+            val reportCrash = rememberCrashReportAction(onLogsCleared = { crashLogCount = 0 })
+
+            AboutSettingsSection(
+                onOpenCopyright = onOpenCopyright,
+                updateUi = vm.updateUi,
+                onCheckUpdate = { vm.checkUpdate(manual = true) },
+                crashLogCount = crashLogCount,
+                onReportCrash = reportCrash,
+            )
+        }
         // 分类排序：顺序本身住在 VM（homeTabOrder 只读 + moveHomeTab/resetHomeTabOrder），
         // 这一页只读它、只发指令。
         //

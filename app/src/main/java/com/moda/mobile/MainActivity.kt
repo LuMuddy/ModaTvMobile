@@ -1,19 +1,44 @@
 package com.moda.mobile
 
+import android.Manifest
+import android.content.Context
+import android.content.ContextWrapper
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Environment
+import android.provider.Settings
 import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import com.moda.mobile.crash.CrashHandler
+import com.moda.mobile.crash.CrashLog
+import com.moda.mobile.data.local.StoragePromptStore
+import com.moda.mobile.data.local.StoragePromptStoreImpl
 import com.moda.mobile.ui.AppRoot
+import com.moda.mobile.ui.StorageGuideDialog
 import com.moda.mobile.ui.theme.ModaColors
 import com.moda.mobile.ui.theme.ModaTheme
+import kotlinx.coroutines.launch
 
 /**
  * 手机端唯一的 Activity。
@@ -29,9 +54,21 @@ import com.moda.mobile.ui.theme.ModaTheme
  */
 class MainActivity : ComponentActivity() {
 
+    /**
+     * 存储权限：崩溃日志要写到 /sdcard/crash，那是一个别的应用也看得到的目录。
+     *
+     * 回调里不做任何事——不弹 Toast、不写状态位。日志能不能落盘不取决于这次申请记没记住，
+     * 而取决于写入那一刻 CrashLog 判出的实际可写目录（见 crash/CrashLog.kt 的 dir()）：
+     * 授了就落 /sdcard/crash，没授就落应用自己的外部目录，两条路都有日志可看。
+     */
+    private val storagePermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { /* 结果不改变任何界面状态，见上 */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         configureWindow()
+        requestStoragePermissionIfPossible()
 
         setContent {
             ModaTheme {
@@ -39,8 +76,112 @@ class MainActivity : ComponentActivity() {
                 Box(Modifier.fillMaxSize().background(ModaColors.Bg)) {
                     AppRoot()
                 }
+                // 挂在 AppRoot 之外：授权门挡在前面时它也得能提示
+                //（未授权的机器同样会崩，日志一样要落盘）
+                StorageGuideHost()
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // 用户刚从设置页打开「所有文件访问」回来时，本进程启动时那次判定还是"没权限"，
+        // 处理器因此没装（ModaApp.onCreate 只在有权限时装）。这里补一次：
+        // 不补的话，授权之后到下次冷启动之间的崩溃一条日志都不会留，而用户恰恰是
+        // 为了"能上报崩溃"才去授权的，这段空窗正好把他最想复现的那次崩掉。
+        // install 内部有 CAS，重复调用是安全的。
+        if (CrashLog.permitted(this)) CrashHandler.install(this)
+    }
+
+    /**
+     * 启动时的存储引导：Android 11+ 走「所有文件访问」的说明书式弹窗。
+     *
+     * 判定三件事：系统确实需要这个权限（11+）、现在还没给、这个版本还没提示过。
+     * 三者任一不成立组合里就不出现——尤其第三条：这是跳系统设置页的重活，每次冷启动都弹
+     * 会变成骚扰，同一个 versionCode 只问一次（判定存在 moda_storage_prompt）。
+     */
+    @Composable
+    private fun StorageGuideHost() {
+        val context = LocalContext.current
+        val store: StoragePromptStore = remember(context) {
+            StoragePromptStoreImpl.create(context.applicationContext)
+        }
+        val scope = rememberCoroutineScope()
+        var visible by remember { mutableStateOf(false) }
+
+        LaunchedEffect(store) {
+            if (!needsAllFilesAccess()) return@LaunchedEffect
+            // 读不出来（IO 异常）就当没提示过：宁可多问一次，也不要让用户永远看不到这条路
+            val acked = runCatching { store.acknowledgedVersion() }.getOrDefault(0)
+            visible = acked != BuildConfig.VERSION_CODE
+        }
+
+        if (!visible) return
+
+        // 记住「这个版本问过了」只有一种写法：读完就写。点哪颗按钮都写——
+        // 用户点「以后再说」也是给了答案，下一次冷启动再弹就是在无视他的选择
+        val remember = {
+            visible = false
+            scope.launch { runCatching { store.acknowledge(BuildConfig.VERSION_CODE) } }
+            Unit
+        }
+
+        StorageGuideDialog(
+            onConfirm = {
+                remember()
+                openAllFilesAccessSettings(this)
+            },
+            onDismiss = remember,
+        )
+    }
+
+    /** Android 11+ 且尚未获得「所有文件访问」才需要引导；低版本走 WRITE_EXTERNAL_STORAGE 运行时权限 */
+    private fun needsAllFilesAccess(): Boolean =
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()
+
+    /**
+     * 跳「所有文件访问」设置页。
+     *
+     * 先试带包的 ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION（直接落在本应用的开关上），
+     * 个别 ROM 不认这个 action，再退到整个应用的列表页——退一步用户还得自己找一下，
+     * 但总好过点了没反应。
+     */
+    private fun openAllFilesAccessSettings(context: Context) {
+        val direct = Intent(
+            Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+            Uri.fromParts("package", context.packageName, null),
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        try {
+            context.startActivity(direct)
+            return
+        } catch (_: Exception) {
+            // 下面再试列表页
+        }
+        try {
+            context.startActivity(
+                Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+        } catch (_: Exception) {
+            // 两个都打不开（极个别裁剪过的 ROM）：弹窗已经记住了「问过」，日志走应用私有目录
+        }
+    }
+
+    /**
+     * 启动就申请一次存储权限（用户要求「打开的时候申请一下」）。
+     *
+     * 只在一拿到就真能用的版本上发起：WRITE_EXTERNAL_STORAGE 从 Android 11 起对
+     * targetSdk >= 30 的应用恒为拒绝，弹了也只是闪一下或者干脆不弹，
+     * 用户会以为申请失败——那种"申请了但什么也没发生"比不申请更让人困惑。
+     * 高版本走 CrashLog 的降级目录（/sdcard/Android/data/<包名>/files/crash），不需要权限。
+     */
+    private fun requestStoragePermissionIfPossible() {
+        if (Build.VERSION.SDK_INT > Build.VERSION_CODES.Q) return
+        val granted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.WRITE_EXTERNAL_STORAGE,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) storagePermission.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
     }
 
     /**

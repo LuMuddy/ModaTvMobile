@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 崩溃日志存储位置的引导弹窗（Android 11+ 走「所有文件访问」）。
+     单独一个文件而不是塞进 strings_crash.xml：那一份是崩溃页（:crash 进程）的文案，
+     这一份是主界面的权限引导，两处生命周期与改动理由都不同。 -->
+<resources>
+    <string name="m_storage_guide_title">开启「所有文件访问」</string>
+    <string name="m_storage_guide_body">应用崩溃时会把日志写到本机的 sdcard/crash 目录，方便你取出来。Android 11 起系统要求先到设置里为本应用打开「所有文件访问」，否则日志只能存在应用自己的目录里（卸载应用会一起删掉）。</string>
+    <string name="m_storage_guide_confirm">去开启</string>
+    <string name="m_storage_guide_later">以后再说</string>
+</resources>

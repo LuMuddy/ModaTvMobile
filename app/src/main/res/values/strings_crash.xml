@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 崩溃页（:crash 进程）的全部上屏文案。
+     这一页在系统"应用已停止运行"之后才出现，文案要能独立读懂：
+     不出现"错误码""重试"这类需要上下文才成立的词。
+     键统一 m_crash_ 前缀：手机端独有，TV 端没有对应页面。 -->
+<resources>
+    <string name="m_crash_title">应用遇到问题，已停止</string>
+    <string name="m_crash_desc">崩溃信息已保存到这台设备上，可以把下面的内容复制后发给开发者。</string>
+    <string name="m_crash_time">崩溃时间</string>
+    <string name="m_crash_path">日志位置</string>
+    <string name="m_crash_path_unavailable">未能写入文件</string>
+    <string name="m_crash_detail">崩溃详情</string>
+    <string name="m_crash_copy">复制日志</string>
+    <string name="m_crash_copied">已复制</string>
+    <string name="m_crash_restart">重新打开</string>
+    <string name="m_crash_close">关闭</string>
+    <string name="m_crash_empty">没有读到崩溃内容</string>
+    <string name="m_crash_clip_label">ModaTv 崩溃日志</string>
+</resources>

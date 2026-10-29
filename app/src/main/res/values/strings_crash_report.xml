@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 设置页「上报崩溃」的文案。
+     与 strings_crash.xml（崩溃页，跑在 :crash 进程）分开：这一份是主进程设置页的，
+     两处的显示时机、改动理由都不同，混在一个文件里迟早会改错地方。 -->
+<resources>
+    <string name="m_crash_report_row_title">上报崩溃</string>
+    <!-- 只在真的存在崩溃日志时这一行才出现，值直接说清有多少个 -->
+    <string name="m_crash_report_row_value">%1$d 个日志</string>
+    <string name="m_crash_report_share_title">分享崩溃日志</string>
+    <string name="m_crash_report_failed">打包失败，请稍后重试</string>
+    <string name="m_crash_report_share_failed">没有可以接收压缩包的应用</string>
+    <string name="m_crash_report_ask_title">分享完成</string>
+    <string name="m_crash_report_ask_body">压缩包已打包到 %1$s。现在删除它吗？</string>
+    <string name="m_crash_report_delete">删除</string>
+    <string name="m_crash_report_keep">保留</string>
+    <string name="m_crash_report_error_title">上报崩溃</string>
+    <string name="m_crash_report_error_ok">好</string>
+</resources>

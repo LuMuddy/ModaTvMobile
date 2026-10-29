@@ -275,6 +275,27 @@ internal fun PlaybackSettingsSection(holder: PlayerSettingsHolder) {
                 )
             }
             HintText(stringResource(R.string.settings_playback_danmaku_hint))
+
+            // 流量播放提醒：与详情页确认卡里的「不再提醒」是**同一个键**
+            // （PlayerSettings.cellularPrompt），改一处另一处立刻一起变
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    stringResource(R.string.m_settings_playback_traffic_prompt),
+                    style = ModaType.Body,
+                    color = ModaColors.Text,
+                    modifier = Modifier.weight(1f),
+                )
+                Switch(
+                    checked = settings.cellularPrompt,
+                    onCheckedChange = { prompt ->
+                        holder.apply(settings.copy(cellularPrompt = prompt))
+                    },
+                )
+            }
+            HintText(stringResource(R.string.m_settings_playback_traffic_prompt_hint))
         }
     }
 }
@@ -459,6 +480,13 @@ internal fun AboutSettingsSection(
     updateUi: UpdateUi,
     /** 点「检查更新」：manual = true，失败会在这个弹窗里说出来 */
     onCheckUpdate: () -> Unit,
+    /**
+     * 现有崩溃日志条数。0 = 没有可上报的东西，**这一行整行不出现**——
+     * 常驻一个点进去只会说"没有日志"的入口，等于让用户白点一次。
+     */
+    crashLogCount: Int = 0,
+    /** 点「上报崩溃」：打包 → 分享 → 问是否删除压缩包，整套在 rememberCrashReportAction 里 */
+    onReportCrash: () -> Unit = {},
     versionName: String = BuildConfig.VERSION_NAME,
     versionCode: Int = BuildConfig.VERSION_CODE,
 ) {
@@ -489,6 +517,16 @@ internal fun AboutSettingsSection(
                 value = stringResource(R.string.settings_copyright_value),
                 onClick = onOpenCopyright,
             )
+            // 上报崩溃：只有确实存在崩溃日志时才出现（用户要求）。
+            // 放在「关于」这一段最后一行：它是排障入口，不是日常设置项，
+            // 平时这一行根本不在屏幕上，不会干扰正常的版本/更新信息。
+            if (crashLogCount > 0) {
+                SettingRow(
+                    label = stringResource(R.string.m_crash_report_row_title),
+                    value = stringResource(R.string.m_crash_report_row_value, crashLogCount),
+                    onClick = onReportCrash,
+                )
+            }
         }
     }
 }
