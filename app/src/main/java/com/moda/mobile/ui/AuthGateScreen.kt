@@ -1,7 +1,5 @@
 package com.moda.mobile.ui
 
-import android.content.Intent
-import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -13,6 +11,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -37,7 +36,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.input.ImeAction
@@ -69,8 +67,9 @@ internal const val AUTH_CODE_LENGTH = 8
  * wx_qr 响应里的 uuid 字段一致。所以本地拼这条原文就够了——既不用下载那张图，
  * 也就不受图片缩放/染色/暗色主题的影响（屏幕上的每一个模块都是我们自己画的）。
  *
- * 手机端多出来的那条路（契约 §0.3「一键拉起微信确认」）用的是同一个前缀：
- * 屏幕上的二维码与「用微信打开授权链接」按钮指向的是同一条 URL，两者可以互换。
+ * 这个前缀只用来**画二维码**（屏幕上每一个模块都是自己画的）。
+ * 不要拿它做「本机一键拉起微信」：ACTION_VIEW 打不开微信的这条链接，相册识别也不认，
+ * 详见 AuthGateScreen 的 KDoc。
  */
 internal const val WX_QR_TEXT_PREFIX = "https://open.weixin.qq.com/connect/confirm?uuid="
 
@@ -133,23 +132,24 @@ private enum class GatePhase {
 }
 
 /**
- * 授权门：未授权时全应用唯一的界面 —— 微信登录二维码 + 本机「用微信打开授权链接」+ 状态行
- * + 补位的授权码输入 + 退出。未授权时 Dest 的内容根本不进组合，这是 AppRoot 的职责。
+ * 授权门：未授权时全应用唯一的界面 —— 微信登录二维码 + 状态行 + 补位的授权码输入 + 退出。
+ * 未授权时 Dest 的内容根本不进组合，这是 AppRoot 的职责。
  *
- * ## 手机端与 TV 端最大的交互差异（契约 §0.3）
+ * ## 手机端与 TV 端一样：只能由另一台设备扫
  *
- * 电视上没有微信，所以 TV 端只有「另一台手机扫码」这一条路。手机上这条路依旧保留
- * （同一账号在另一台设备上扫也行），但主路径换成**本机一键拉起**：
- * 点「用微信打开授权链接」→ Intent(ACTION_VIEW) 打开 WX_QR_TEXT_PREFIX + uuid
- * → 微信里点「确认登录」→ 本屏的轮询把会话捞回来。
- * 有多个应用能接这条链接时由系统弹选择器，用户选微信即可；一个都没有时
- * 只把原因写进提示行（不弹窗、不换屏），二维码那条路仍然可用。
+ * 手机上曾经多一条「用微信打开授权链接」（Intent.ACTION_VIEW 打开二维码原文），已删，
+ * 因为实测这条路根本不存在：
+ *  1. 微信不给 http/https 注册 intent-filter，系统选择器里没有微信，只会落到浏览器；
+ *  2. 即便在微信内置浏览器里打开，那条 confirm 链接也只是一张空壳页面 ——
+ *     「确认登录」是微信**扫码模块**扫到这段 URL 时才走的原生界面，不是网页提供的；
+ *  3. 截图后到「扫一扫 → 相册」识别同样不行：微信对登录码只认摄像头扫描。
+ * 所以这一屏只保留二维码，并明确写清"要用另一台手机扫"——见 m_gate_scan_hint。
  *
  * ## 状态机（status → 屏幕上显示什么 → 用户能做什么）
  *
  * | 状态 | 屏幕 | 用户 |
  * |------|------|------|
- * | pending   | 二维码 + 「请用微信扫一扫」                   | 扫码 / 点微信按钮 / 刷新 / 退出 |
+ * | pending   | 二维码 + 「请用微信扫一扫」                   | 另台手机扫码 / 刷新 / 退出 |
  * | scanned   | 二维码 + 「已扫码，请在手机上点『确认登录』」   | 等手机（其余按钮仍在） |
  * | expired   | 二维码撤下 + 「二维码已过期，请点刷新」        | 刷新 / 退出 |
  * | ok        | 本屏不再渲染：会话已落盘，AppRoot 切到正常界面  | 无（门已经没了） |
@@ -177,7 +177,6 @@ fun AuthGateScreen(
     // 门的下面没有任何一层，返回键无处可穿，直接结束应用
     BackHandler(enabled = true) { onExit() }
 
-    val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
     var phase by remember { mutableStateOf(GatePhase.LoadingQr) }
@@ -195,7 +194,6 @@ fun AuthGateScreen(
 
     val failureFallback = stringResource(R.string.settings_auth_failed)
     val invalidCodeHint = stringResource(R.string.gate_code_invalid)
-    val wechatFailedHint = stringResource(R.string.m_gate_wechat_failed)
 
     /**
      * 重新取一张码。失败只报原因 + 让用户再刷新一次，**不**展开授权码框：
@@ -293,15 +291,6 @@ fun AuthGateScreen(
         scope.launch { loadQr() }
     }
 
-    /** 本机一键拉起微信确认；没有能接这条链接的应用时只写提示行，二维码那条路不受影响 */
-    fun openWechat(uuid: String) {
-        val url = WX_QR_TEXT_PREFIX + uuid
-        val ok = runCatching {
-            context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
-        }.isSuccess
-        if (!ok) notice = wechatFailedHint
-    }
-
     fun submitCode() {
         if (busy) return
         // 输入框只在 need_code 那一次之后出现（见轮询的 NeedCode 分支，这是唯一入口），
@@ -345,9 +334,12 @@ fun AuthGateScreen(
     }
     // 只在 uuid 变化时重算：轮询每 1.5s 改一次状态，二维码本身一个像素都不该重编码
     val qrText = ticket?.let { WX_QR_TEXT_PREFIX + it.uuid }
-    val uuid = ticket?.uuid
 
-    Box(Modifier.fillMaxSize().background(ModaColors.Bg)) {
+    // safeDrawingPadding 不能省：本应用是 edge-to-edge（setDecorFitsSystemWindows(false)），
+    // 这一屏又是唯一没有 Scaffold / 压栈页壳子的整屏页。少了它，最底下那排
+    // 「刷新二维码 / 退出」正好压在导航栏与手势区上——点「退出」会被系统返回手势吞掉，
+    // 屏幕纹丝不动，用户看到的就是「退出去了还是这个授权页」。压栈页是同款处理（见 AppRoot）。
+    Box(Modifier.fillMaxSize().background(ModaColors.Bg).safeDrawingPadding()) {
         // 小屏（含折叠 / 横屏矮窗口）上内容一定超出屏幕，所以整屏可滚：
         // 底部那排按钮永远滚得到，不会被屏幕下沿裁掉
         Column(
@@ -411,23 +403,14 @@ fun AuthGateScreen(
                 )
             }
 
-            // —— 手机端的主路径：本机用微信打开同一条授权链接（契约 §0.3）——
-            // 有 uuid 才可点：没有码时这条链接指向不了任何会话，按钮亮着只会让人白点一次
-            Spacer(Modifier.height(18.dp))
-            Button(
-                onClick = { uuid?.let { openWechat(it) } },
-                enabled = uuid != null && !busy,
-                modifier = Modifier.fillMaxWidth().height(48.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = ModaColors.Accent,
-                    contentColor = Color.White,
-                ),
-            ) {
-                Text(stringResource(R.string.m_gate_wechat_open))
-            }
-            Spacer(Modifier.height(8.dp))
+            // 这条提示曾经是一个按钮（「用微信打开授权链接」），已删：微信不给 http/https
+            // 注册 intent-filter，ACTION_VIEW 的系统选择器里根本没有微信；而且那条 confirm
+            // 链接本身是空壳页面，微信只在「扫一扫」扫到它时才走原生确认页。
+            // 相册识别也一样走不通（微信对登录码只认摄像头），所以这里只说明唯一可行的那条路。
+            Spacer(Modifier.height(16.dp))
             Text(
-                stringResource(R.string.m_gate_wechat_hint),
+                stringResource(R.string.m_gate_scan_hint),
+                modifier = Modifier.fillMaxWidth(),
                 style = ModaType.Caption,
                 color = ModaColors.TextDim,
                 textAlign = TextAlign.Center,
@@ -495,9 +478,10 @@ fun AuthGateScreen(
                 ) {
                     Text(stringResource(R.string.gate_refresh_qr), style = ModaType.Body, color = ModaColors.Text)
                 }
+                // 退出不跟 busy：它是这一屏唯一的逃生口，激活请求在飞时也必须点得动。
+                // 把它和「刷新」一起按 busy 关掉，等于在最需要离开的时候把人锁在门里
                 TextButton(
                     onClick = onExit,
-                    enabled = !busy,
                     modifier = Modifier.weight(1f).height(48.dp),
                 ) {
                     Text(stringResource(R.string.gate_exit), style = ModaType.Body, color = ModaColors.TextDim)

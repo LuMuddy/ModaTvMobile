@@ -173,8 +173,12 @@ object Auth {
      * 由 ViewModel 决定是否提示，旧会话保留。
      */
     suspend fun refresh(): AuthSession? = withContext(Dispatchers.IO) {
+        // 先把这次核验用的令牌快照下来：这是一次网络往返，期间用户可能点了「清除授权」，
+        // 也可能刚完成一次新的扫码登录。结论必须永远对"这一次用的那枚令牌"说话，
+        // 中途回头去读 Api.TOKEN 就等于用旧令牌的答案去覆盖新状态
+        val token = Api.TOKEN
         // 没有 token 就没有"刷新"这回事：这是常态（未授权），不是错误
-        if (Api.TOKEN.isBlank()) return@withContext null
+        if (token.isBlank()) return@withContext null
         val sessionStore = requireStore()
         val existing = sessionStore.get()
         val j = try {
@@ -182,12 +186,20 @@ object Auth {
         } catch (e: CancellationException) {
             throw e
         } catch (e: ApiException) {
-            // 真 401 与 login:false 是同一件事的两种说法：这份凭据不作数了
+            // 真 401 与 login:false 是同一件事的两种说法：这份凭据不作数了。
+            // 但只对"还是这枚令牌"成立——换过凭据之后回来的 401 属于上一段，作废它等于
+            // 把用户刚建立的新会话也一起清掉
             if (e.error == AppError.Unauthorized) {
-                signOut()
+                if (Api.TOKEN == token) signOut()
                 return@withContext null
             }
             throw e
+        }
+        // 这一趟回来时凭据已经被换掉（清除授权 / 重新登录）：整趟结论作废。
+        // 不丢的话，最典型的故障就是「退回授权门之后一秒，它自己又跳回已授权界面」
+        if (Api.TOKEN != token) {
+            Log.i(TAG, "核验期间凭据已更换，丢弃这一次结果")
+            return@withContext null
         }
         // 服务端用 ok=true + login=false 表达"这个 token 换不到身份了"。本地若继续认它，
         // 后续每个请求都要白跑一趟才拿到同样的结论
@@ -196,8 +208,9 @@ object Auth {
             signOut()
             return@withContext null
         }
-        // 会话有效但 acc 可能只回一半：以盘上那份为底，别用空值把上次的账号名擦掉
-        val updated = sessionOf(Api.TOKEN, j.optJSONObject("acc"), existing)
+        // 会话有效但 acc 可能只回一半：以盘上那份为底，别用空值把上次的账号名擦掉。
+        // token 用快照（不是 Api.TOKEN）：写盘这一刻它可能已经被清成空串
+        val updated = sessionOf(token, j.optJSONObject("acc"), existing)
         try {
             sessionStore.save(updated)
         } catch (e: CancellationException) {

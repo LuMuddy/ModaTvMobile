@@ -2,11 +2,12 @@
 <resources>
     <!-- 手机端新增文案（m_ 前缀）。T1 已移植全部 TV 端 strings_*.xml，这里只补手机端独有的几句。 -->
 
-    <!-- 授权门（契约 §0.3）：手机端除了二维码，还多一条「在本机用微信打开授权链接」的路 -->
-    <string name="m_gate_message">在另一台手机上用微信「扫一扫」扫码并确认；也可以直接点下面的按钮，用本机微信打开这条授权链接。</string>
-    <string name="m_gate_wechat_open">用微信打开授权链接</string>
-    <string name="m_gate_wechat_hint">按钮会用系统的「打开链接」拉起微信；没装微信也可以选其它浏览器。</string>
-    <string name="m_gate_wechat_failed">没有能打开这条链接的应用，请改用二维码让另一台手机扫码</string>
+    <!-- 授权门：只有「另一台手机扫码」这一条路。
+         曾经有过一个「用微信打开授权链接」的按钮（Intent.ACTION_VIEW 打开二维码原文），
+         实测走不通：微信不给 http/https 注册 intent-filter，系统选择器里根本没有微信；
+         就算进了微信内置浏览器，那条 confirm 链接也是一张空壳页面。已连文案一起删掉。 -->
+    <string name="m_gate_message">用另一台手机的微信「扫一扫」扫描下方二维码，并在那台手机上点「确认登录」。</string>
+    <string name="m_gate_scan_hint">微信登录码只认摄像头扫描：截图、从相册选取都识别不了，必须用另一台手机对着这块屏幕扫。</string>
 
     <!-- 历史页上并排的「已看完」入口（它不在底栏五项里，见 Dest.Completed） -->
     <string name="m_lib_open_completed">已看完</string>

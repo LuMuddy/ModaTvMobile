@@ -1,6 +1,8 @@
 package com.moda.mobile.ui
 
 import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.os.SystemClock
 import androidx.activity.compose.BackHandler
 import androidx.annotation.StringRes
@@ -84,7 +86,7 @@ fun AppRoot() {
     // 否则切一次分支就等于清空路由栈、重读一遍盘上的会话。
     val vm: MainViewModel = viewModel { MainViewModel(context.applicationContext) }
     val session by vm.authSession.collectAsStateWithLifecycle()
-    val exitApp: () -> Unit = { (context as? Activity)?.finish() }
+    val exitApp: () -> Unit = { context.exitApp() }
 
     // —— 下面三样是「更新检查」的全部运行时依赖，故意挂在授权门之外 ——
     //
@@ -150,6 +152,27 @@ fun AppRoot() {
     if (!vm.authReady || session == null) {
         UpdateDialogHost(vm = vm, progress = updateProgress, suppressed = false)
     }
+}
+
+/**
+ * 退出应用：结束这一屏，并从最近任务里摘掉本任务。
+ *
+ * 为什么不是裸的 Activity.finish()：
+ *  1. LocalContext 不保证就是 Activity（可能是包装它的 ContextThemeWrapper），
+ *     直接强转失败时 finish() 根本不执行，表现是「点了退出，屏幕上还是那个授权页」；
+ *  2. 只 finish 的话任务还留在最近任务列表里，从卡片点回来又是同一个授权页，
+ *     用户同样会读成「退出了它还有个授权页」。finishAndRemoveTask 才是"退出"这一个动作。
+ */
+private fun Context.exitApp() {
+    var c: Context? = this
+    while (c is ContextWrapper) {
+        if (c is Activity) {
+            c.finishAndRemoveTask()
+            return
+        }
+        c = c.baseContext
+    }
+    (this as? Activity)?.finishAndRemoveTask()
 }
 
 /** 「再按一次退出」的判定窗口；超过它再按返回只会重新弹提示 */
@@ -230,7 +253,7 @@ private fun AuthorizedContent(vm: MainViewModel) {
         } else {
             val now = SystemClock.elapsedRealtime()
             if (now - lastBackAt <= EXIT_BACK_WINDOW_MS) {
-                (context as? Activity)?.finish()
+                context.exitApp()
             } else {
                 lastBackAt = now
                 // 先撤掉上一条再弹新的：连按返回时不该看到两条排队（第二次返回是退出，

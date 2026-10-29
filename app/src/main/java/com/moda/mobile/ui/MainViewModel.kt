@@ -625,6 +625,9 @@ class MainViewModel(private val app: Context) : ViewModel() {
      */
     private fun refreshAuthInBackground() {
         authRefreshJob?.cancel()
+        // 这次核验针对的是哪一枚令牌：结果回来时必须还认得它，见下面的比对
+        val token = sessionState.value?.token
+        if (token.isNullOrBlank()) return
         authRefreshJob = viewModelScope.launch {
             val fresh = try {
                 Auth.refresh()
@@ -632,6 +635,13 @@ class MainViewModel(private val app: Context) : ViewModel() {
                 throw e
             } catch (e: Exception) {
                 Log.w("MainViewModel", "授权状态刷新失败：${e.message}")
+                return@launch
+            }
+            // 期间用户可能已经点了「清除授权」（sessionState 被置空）或重新扫码登录（换成新令牌）。
+            // 用旧结论盖新状态的两个方向都会出错：null 会把刚建立的新会话踢回授权门，
+            // 非 null 会把刚作废的会话复活——屏幕上就是"授权门闪一下又自己跳走"
+            if (sessionState.value?.token != token) {
+                Log.i("MainViewModel", "核验结果属于上一段凭据，丢弃")
                 return@launch
             }
             if (fresh == null) {
@@ -787,6 +797,10 @@ class MainViewModel(private val app: Context) : ViewModel() {
     /** 作废本地会话并退回授权门。[reason] 只进日志，说明这次是谁触发的 */
     private suspend fun revokeSession(reason: String) {
         Log.w("MainViewModel", "$reason：作废本地会话，回到授权门")
+        // 在飞的核验先掐掉：它带回的是旧令牌的结论，落地时会把刚作废的会话再写回来
+        // （"点了清除授权、已经站在授权门上了，一秒后它自己又跳回内容页"就是这一条）
+        authRefreshJob?.cancel()
+        authRefreshJob = null
         // 先作废凭据再改界面状态：中间这一小段里任何抢跑的请求都必须已经是"无凭据"短路，
         // 而不是带着刚被判死的 token 再打一次后端
         Auth.signOut()
