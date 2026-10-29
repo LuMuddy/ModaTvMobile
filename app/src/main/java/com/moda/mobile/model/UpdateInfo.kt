@@ -20,9 +20,10 @@ data class UpdateInfo(
      */
     val apkUrl: String,
     /**
-     * 远端那一版的 Android versionCode，来自同一次 Release 挂的 version.json。
-     * 老版本（v1.0.0 及更早）没有这个文件，所以是 null——「不清楚」和「等于 0」不能混成同一个值，
-     * 否则判定会拿一个不存在的版本码去比，把「没数据」读成「比本机旧」。
+     * 远端那一版的 Android versionCode，来自同一次 Release 挂的 version-mobile.json
+     * （由 .github/workflows/android-release.yml 按 tag 序号生成）。
+     * 「要不要提示更新」只比这个数：它缺失时是 null，判成「没有更新」——
+     * 「不清楚」和「等于 0」不能混成同一个值，否则会把「没数据」读成一个可以比大小的版本码。
      */
     val versionCode: Int? = null,
 )

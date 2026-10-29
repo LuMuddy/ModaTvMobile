@@ -2190,13 +2190,12 @@ class MainViewModel(private val app: Context) : ViewModel() {
         updateCheckJob = viewModelScope.launch {
             try {
                 val latest = Repo.latestRelease()
-                // 判据在 VersionRules 里：优先比远端 version.json 的 versionCode，
-                // 拿不到（v1.0.0 那种老 Release 没这个文件）才回落比版本名
+                // 判据在 VersionRules 里：只看 versionCode 的大小，不看版本名。
+                // 远端票据里没有 versionCode（null）时判「没有更新」，不回落到比版本名——
+                // 版本名已不带可比较的信息（发版号是 tag 序号），比出来的是垃圾值。
                 val newer = VersionRules.isNewer(
                     remoteCode = latest.versionCode,
-                    remoteName = latest.versionName,
                     localCode = BuildConfig.VERSION_CODE,
-                    localName = BuildConfig.VERSION_NAME,
                 )
                 if (!newer) {
                     // 查成功了、确认已是最新：落 Latest 而不是 Idle——Idle 是"没得说"，

@@ -66,8 +66,8 @@ object UpdateSource {
      * 为什么是一种返回值而不是一次抛错：资产缺失（404 / JSON 坏 / files 为空）不是故障，
      * 是「手机端还没发布过版本」这件事的正常表达。抛错会让检查这条链路进入 catch 分支，
      * 错误语义被下游误读成「检查失败」；而这里出去的 UpdateInfo 会走
-     * [com.moda.mobile.data.local.VersionRules.isNewer] 的正常判定——空版本名解析成 0，
-     * 永远不比本机版本新，于是 UI 落到「已是最新」。用户看到的必须是这一句。
+     * [com.moda.mobile.data.local.VersionRules.isNewer] 的正常判定——versionCode 是 null，
+     * 判不出「更新」，于是 UI 落到「已是最新」。用户看到的必须是这一句。
      */
     private val NO_UPDATE = UpdateInfo(versionName = "", notes = "", apkUrl = "", versionCode = null)
 
@@ -128,8 +128,8 @@ object UpdateSource {
      * 三个字段各有取舍：
      * - `versionName` 缺了或没有数字 → null。它是 APK 直链的唯一组成部分，
      *   一个非数字的「版本名」会以版本号的身份进入比较逻辑，比的是垃圾值。
-     * - `versionCode` 缺了 → 留 null 交给 [com.moda.mobile.data.local.VersionRules] 回落比版本名，
-     *   绝不在这里编一个 0：0 会被读成「比本机旧」。
+     * - `versionCode` 缺了 → 留 null，由 [com.moda.mobile.data.local.VersionRules] 判成「没有更新」。
+     *   这里不回落比版本名，也绝不编一个 0：版本名已经被发版号取代，没有可比较的信息。
      * - `files` 为空数组 → null。这一版什么资产都没挂，就算有版本号也没有可下载的东西；
      *   弹一个「立即更新」出去，用户点下去只会看到下载失败。
      */

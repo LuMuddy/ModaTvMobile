@@ -1,68 +1,27 @@
 package com.moda.mobile.data.local
 
 /**
- * 版本号强弱的纯函数。
+ * 「要不要提示更新」的唯一判据：**远端 versionCode 严格大于本机 versionCode**。
  *
- * 刻意不做语义化版本（SemVer）的完整实现：本仓库的 tag 就是 `v<versionName>`，
- * 版本来源只有我们自己这一个地方，用不上 caret/tilde 那套范围语法。
+ * 为什么不再比版本名：手机端的发版号已经改成单调递增的整数序号（v1.0.0 → 1、v1.0.1 → 2，
+ * 由 .github/workflows/android-release.yml 按 tag 序号复算），版本名只剩给人看的作用，
+ * 而两个版本名谁新本来就得靠「按 . - + 切段再比数字」的规则去猜——
+ * "1.0.10" 与 "1.1.0" 猜错一次就是「某些版本永远收不到更新」，
+ * 这种故障只在用户侧、只在某些版本上暴露。versionCode 是单调整数，
+ * Android 自己判覆盖安装也是按它，拿它判「有没有新版」没有歧义。
  *
- * **简化：预发布后缀不参与强弱比较。** 比较时按 `.` / `-` / `+` 切段，每段只取
- * 开头的数字前缀，因此 `1.0.0` 与 `1.0.0-beta` 被判为相等、`1.0.0-beta` 不会
- * 被视为比 `1.0.0` 更旧。取舍是故意的：这里的唯一用途是"有没有比本机装的新"，
- * 而本仓库从不发布预发布版；若按 SemVer 判 `1.0.0-rc1 < 1.0.0`，
- * 一次误打的 tag 会让用户永远收不到"比 rc 更新的正式版"提示（相等判 0 也意味着不弹窗）。
+ * 为什么不再保留按名字回落：回落只在远端票据**没有** versionCode 时才生效，
+ * 而那种票据本来就没法可靠地判新旧，回落的结果是把「不知道」当成「有一个新版」推给用户。
+ * 宁可当作「没有更新」，也不推一个下载不了的包。现在 version-mobile.json 由 CI 生成，
+ * versionCode 一定在里头。
+ *
+ * [remoteCode] 为 null（票据里没有这个字段）或 <= 0（数字坏了）一律判「没有更新」：
+ * 一个不可信的数字比没有数字更危险。
  *
  * 无 Context / DataStore / 协程：可以脱离 Android 直接验证边界。
  */
 object VersionRules {
 
-    /**
-     * a < b 返回负数，相等返回 0，a > b 返回正数。只保证符号有意义，不保证是 ±1。
-     */
-    fun compare(a: String, b: String): Int {
-        val left = segments(a)
-        val right = segments(b)
-        // 缺失段按 0：否则 "1.3" 与 "1.3.0" 会被判成不等，而它们其实是同一个版本
-        for (i in 0 until maxOf(left.size, right.size)) {
-            val l = left.getOrElse(i) { 0L }
-            val r = right.getOrElse(i) { 0L }
-            if (l != r) return if (l < r) -1 else 1
-        }
-        return 0
-    }
-
-    fun isNewer(candidate: String, current: String): Boolean = compare(candidate, current) > 0
-
-    /**
-     * 「要不要提示更新」的唯一判据：**优先比 versionCode**，拿不到才回落比版本名。
-     *
-     * 为什么不再只看版本名：版本名是给人读的字符串，"1.0.10" 与 "1.1.0" 谁新要靠切段规则
-     * 去猜，规则错一次就是「某些版本永远收不到更新」这种只在用户侧才暴露的故障。
-     * versionCode 是单调整数，Android 自己也是按它判覆盖安装，比它没有歧义。
-     *
-     * 为什么必须保留版本名这条回落：version.json 是 v1.0.1 起才挂上的，v1.0.0 的
-     * Release 里没有；只认 versionCode 等于把老版本用户永久留在旧版上。
-     *
-     * [remoteCode] 为 null（没有 version.json）或 <= 0（文件坏了）都走回落：
-     * 一个不可信的数字比没有数字更危险。
-     */
-    fun isNewer(remoteCode: Int?, remoteName: String, localCode: Int, localName: String): Boolean =
-        if (remoteCode != null && remoteCode > 0) remoteCode > localCode
-        else isNewer(remoteName, localName)
-
-    private fun segments(version: String): List<Long> {
-        val trimmed = version.trim()
-        // tag 叫 v1.2.3，VersionName 叫 1.2.3，两者必须能直接比
-        val bare = if (trimmed.startsWith("v") || trimmed.startsWith("V")) trimmed.substring(1) else trimmed
-        return bare.split('.', '-', '+').map { leadingNumber(it) }
-    }
-
-    /** 只取开头的数字前缀；没有数字（"beta"、空串）按 0 */
-    private fun leadingNumber(segment: String): Long {
-        var end = 0
-        while (end < segment.length && segment[end] in '0'..'9') end++
-        if (end == 0) return 0L
-        // 构建号被塞进版本号时可能长到溢出 Long，饱和到 MAX 才能保持比较单调（不因溢出变负）
-        return segment.substring(0, end).toLongOrNull() ?: Long.MAX_VALUE
-    }
+    fun isNewer(remoteCode: Int?, localCode: Int): Boolean =
+        remoteCode != null && remoteCode > 0 && remoteCode > localCode
 }
