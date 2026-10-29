@@ -49,6 +49,8 @@ internal fun rememberCrashReportAction(onLogsCleared: () -> Unit): () -> Unit {
 
     // 已打包的压缩包；非空才可能有"删不删"这一问
     var packed by remember { mutableStateOf<File?>(null) }
+    // 打包完成但还没进分享面板：先让用户看清文件名与路径（用户要求"分享前提示路径和文件名"）
+    var showPacked by remember { mutableStateOf(false) }
     var askDelete by remember { mutableStateOf(false) }
     var errorRes by remember { mutableStateOf<Int?>(null) }
     // 只有"刚发过分享"之后回到前台才弹问句：冷启动、从别的页返回都不该问
@@ -76,14 +78,50 @@ internal fun rememberCrashReportAction(onLogsCleared: () -> Unit): () -> Unit {
                 packed = result.zip
                 // 源文件已经并进压缩包，设置页那一行现在就该消失
                 onLogsCleared()
-                awaitingShareReturn = true
-                if (!share(context, result.zip)) {
-                    // 分享面板都拉不起来（没有能处理 zip 的应用）：压缩包留着，也别再问删不删
-                    awaitingShareReturn = false
-                    errorRes = R.string.m_crash_report_share_failed
-                }
+                // 先提示再分享：路径与文件名是用户唯一能核对"发出去的是哪个文件"的东西，
+                // 直接甩进分享面板的话，用户点完才想起来看它是谁
+                showPacked = true
             }
         }
+    }
+
+    val justPacked = packed
+    if (showPacked && justPacked != null) {
+        AlertDialog(
+            // 关掉弹窗 = 这次不分享了：压缩包留在原处，用户自己知道路径就能去文件管理器取
+            onDismissRequest = { showPacked = false },
+            containerColor = ModaColors.Surface,
+            title = { Text(stringResource(R.string.m_crash_report_packed_title), style = ModaType.Heading) },
+            text = {
+                Text(
+                    stringResource(
+                        R.string.m_crash_report_packed_body,
+                        justPacked.name,
+                        justPacked.parent.orEmpty(),
+                    ),
+                    style = ModaType.Body,
+                    color = ModaColors.TextDim,
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    showPacked = false
+                    awaitingShareReturn = true
+                    if (!share(context, justPacked)) {
+                        // 没有能接收 zip 的应用：压缩包留着，别再问删不删
+                        awaitingShareReturn = false
+                        errorRes = R.string.m_crash_report_share_failed
+                    }
+                }) {
+                    Text(stringResource(R.string.m_crash_report_share), color = ModaColors.Accent)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPacked = false }) {
+                    Text(stringResource(R.string.m_crash_report_cancel), color = ModaColors.TextDim)
+                }
+            },
+        )
     }
 
     if (askDelete) {
@@ -93,8 +131,14 @@ internal fun rememberCrashReportAction(onLogsCleared: () -> Unit): () -> Unit {
             containerColor = ModaColors.Surface,
             title = { Text(stringResource(R.string.m_crash_report_ask_title), style = ModaType.Heading) },
             text = {
+                // 正文里必须带"等对方收完再删"这句：分享面板一关并不代表文件已经传完，
+                // 很多应用是后台排队上传的，此刻删掉会让对方拿到一个空文件
                 Text(
-                    stringResource(R.string.m_crash_report_ask_body, zip?.absolutePath.orEmpty()),
+                    stringResource(
+                        R.string.m_crash_report_ask_body,
+                        zip?.name.orEmpty(),
+                        zip?.parent.orEmpty(),
+                    ),
                     style = ModaType.Body,
                     color = ModaColors.TextDim,
                 )
