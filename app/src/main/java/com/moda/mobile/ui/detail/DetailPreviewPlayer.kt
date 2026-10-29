@@ -1,9 +1,11 @@
 package com.moda.mobile.ui.detail
 
 import android.content.Context
+import android.content.pm.ActivityInfo
 import android.media.AudioManager
 import android.util.Log
 import android.view.WindowManager
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -31,6 +33,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.BrightnessMedium
 import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.Fullscreen
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Speed
@@ -67,6 +70,8 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -74,20 +79,32 @@ import androidx.media3.common.Player
 import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.moda.mobile.R
+import com.moda.mobile.data.local.AspectMode
 import com.moda.mobile.model.AppError
+import com.moda.mobile.model.Episode
 import com.moda.mobile.model.PlayerError
 import com.moda.mobile.ui.DetailPreview
 import com.moda.mobile.ui.components.appErrorText
 import com.moda.mobile.ui.components.playerErrorText
+import com.moda.mobile.ui.player.AspectSheet
 import com.moda.mobile.ui.player.CastController
 import com.moda.mobile.ui.player.CastDevice
 import com.moda.mobile.ui.player.CastSheet
 import com.moda.mobile.ui.player.CastStatusChip
+import com.moda.mobile.ui.player.EpisodeSheet
 import com.moda.mobile.ui.player.PlaybackSession
+import com.moda.mobile.ui.player.PlayerBottomBar
 import com.moda.mobile.ui.player.PlayerEngine
+import com.moda.mobile.ui.player.PlayerPanel
+import com.moda.mobile.ui.player.PlayerSheet
+import com.moda.mobile.ui.player.PlayerTopBar
+import com.moda.mobile.ui.player.QualitySheet
+import com.moda.mobile.ui.player.SheetOption
 import com.moda.mobile.ui.player.SpeedSheet
 import com.moda.mobile.ui.player.findActivity
 import com.moda.mobile.ui.player.formatClock
+import com.moda.mobile.ui.player.panelLabel
+import com.moda.mobile.ui.speedLabelOf
 import com.moda.mobile.ui.theme.ModaColors
 import com.moda.mobile.ui.theme.ModaType
 import kotlin.math.abs
@@ -136,16 +153,24 @@ private enum class LevelKind { Brightness, Volume }
  * 底行 = 播放/暂停 · 当前时间 · 进度条 · 总时长 · 全屏。全屏**并在这行里**，不单独浮在画面中：
  * 一颗浮块贴着进度条上方，在 16:9 的高度里两者都读不清。
  *
- * 这里**没有**选集、清晰度/内核/解码/比例面板：那些是"换个屏幕看"的
- * 需求，全屏页已经有一份；小屏再摆一套，两边的规则会各自演进（尤其档位与内核覆盖）。
- * 小屏也不写历史、不判 [com.moda.mobile.data.local.IntroOutroRules] 的片头片尾——
- * 进度始终只由全屏播放页负责，否则同一部剧会有两个写者。
+ * 小屏这一层**没有**选集、清晰度/内核/解码/比例面板：那些是"换个屏幕看"的需求，
+ * 由 [fullscreen] 那一支（大屏控件集）提供。小屏也不写历史、不判
+ * [com.moda.mobile.data.local.IntroOutroRules] 的片头片尾——进度始终只由全屏播放页负责，
+ * 否则同一部剧会有两个写者。
+ * 全屏面板同样不碰内核/解码/片头片尾：那几项的生效路径要么重建引擎、要么写 DataStore，
+ * 都不该从这一页发起（播放页路由还在，那些入口在那儿）。
  *
  * 引擎只用 ExoPlayer：小屏不是排查解码问题的地方（换内核/软解是播放页的面板），
  * 起不来就给一块错误面板 + 重试，外加一个直链→HLS 的自动回退。
  *
  * [onSpeedChange] 只把选择同步给调用方（默认空实现）：倍速是否需要跨页持久化由上层决定，
  * 本组件不碰 DataStore。
+ *
+ * [fullscreen] 只换布局、不换引擎：同一个节点在「16:9 卡片」与「整块屏幕」之间改 Modifier，
+ * 控件集从小屏四角换成 [com.moda.mobile.ui.player] 的 PlayerTopBar / PlayerBottomBar + 面板。
+ * **这一段里没有任何 release / acquire / start**：小屏 ↔ 全屏来回切，引擎与它的 Surface
+ * 自始至终是同一个（logcat 里「新建并起播」整段只该出现一次）。谁把这里改成"换路由/换组件"，
+ * 用户看到的就是一帧黑再重贴。
  */
 @Composable
 fun DetailPreviewPlayer(
@@ -161,6 +186,13 @@ fun DetailPreviewPlayer(
     onRetry: () -> Unit,
     onBack: () -> Unit,
     onEnterFullscreen: () -> Unit,
+    /** 退出全屏：**只改布局**（不换路由、不碰引擎）。顶栏返回、返回键、后退层都用它 */
+    onExitFullscreen: () -> Unit = {},
+    /** 全屏是页面布局状态，由详情页持有；播放器只按它切换自己那颗 Modifier */
+    fullscreen: Boolean = false,
+    /** 全屏「选集」面板的数据源；点一集仍然走页面既有的出口（去播放页看这一集） */
+    episodes: List<Episode> = emptyList(),
+    onSelectEpisode: (Episode) -> Unit = {},
     onSpeedChange: (Float) -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
@@ -232,6 +264,15 @@ fun DetailPreviewPlayer(
     var castResumeMs by remember { mutableLongStateOf(0L) }
     var castSheetVisible by remember { mutableStateOf(false) }
     var castFailure by remember { mutableStateOf(false) }
+
+    // —— 全屏（大屏控件集）——
+    // 全屏只是**换布局**：这一段状态里没有任何 release / acquire / start，
+    // 引擎与它的 Surface 全程不动（换源才该重建，换屏幕不该）。
+    var locked by remember { mutableStateOf(false) }
+    // 一次只开一张底部面板（null = 都没有）
+    var panel by remember { mutableStateOf<PlayerPanel?>(null) }
+    // 画面比例：这颗播放器自己的显示参数，不落盘（本页没有 settings），退出页面即回到 Fit
+    var aspectMode by remember { mutableStateOf(AspectMode.Fit) }
 
     // —— 纵滑（亮度/音量）——
     var brightness by remember { mutableFloatStateOf(0.5f) }
@@ -396,10 +437,59 @@ fun DetailPreviewPlayer(
 
     // 控制层 3 秒无操作自动收起。面板开着时不收：那会儿用户在看面板，
     // 收起只会让关掉面板后这一格变成"什么都没有"。
-    LaunchedEffect(controlsVisible, controlsTick, castSheetVisible, speedSheetVisible) {
-        if (!controlsVisible || castSheetVisible || speedSheetVisible) return@LaunchedEffect
+    LaunchedEffect(controlsVisible, controlsTick, castSheetVisible, speedSheetVisible, panel) {
+        if (!controlsVisible || castSheetVisible || speedSheetVisible || panel != null) return@LaunchedEffect
         delay(ControlsAutoHideMs)
         controlsVisible = false
+    }
+
+    // 返回键分层：先关投屏面板 → 再关底部面板 → 再解锁 → 再收控制层 → 最后退全屏。
+    // 全屏时这条接管系统返回；非全屏 enabled = false，交回 AppRoot 那条（pop 详情页），
+    // 于是"按钮退一层、返回键退两层"不会发生。
+    BackHandler(enabled = fullscreen) {
+        when {
+            castSheetVisible -> castSheetVisible = false
+            panel != null -> panel = null
+            locked -> locked = false
+            controlsVisible -> controlsVisible = false
+            else -> onExitFullscreen()
+        }
+    }
+
+    /**
+     * 全屏 = 横屏 + 隐藏系统栏；退出全屏 / 离开页面都要还原。
+     *
+     * 申请与恢复成对写在**同一个** DisposableEffect 里，触发点从"页面销毁"改成 fullscreen 变化：
+     * 退出全屏与离开页面都会走 onDispose，所以方向、系统栏一定都能回去
+     * （沿用播放页那一套写法，只是把 key 换成 fullscreen）。
+     * 清单里 configChanges 吞掉了 orientation，这一来一回不会重建 Activity，
+     * 播放器状态与 Surface 也就跟着留下来。
+     */
+    DisposableEffect(activity, fullscreen) {
+        val window = activity?.window
+        val controller = window?.let { WindowInsetsControllerCompat(it, it.decorView) }
+        if (fullscreen) {
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+            // 从屏幕边缘上划可以临时唤出系统栏，但不会退出沉浸式
+            controller?.systemBarsBehavior =
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            controller?.hide(WindowInsetsCompat.Type.systemBars())
+        }
+        onDispose {
+            controller?.show(WindowInsetsCompat.Type.systemBars())
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        }
+    }
+
+    // 进出全屏的状态落点：进全屏先亮一次控制层（第一眼只有画面的话，看不出这是能点的播放器）；
+    // 退全屏把大屏才有的状态清掉——锁与面板不该在 16:9 那格里继续生效
+    LaunchedEffect(fullscreen) {
+        if (fullscreen) {
+            touchControls()
+        } else {
+            locked = false
+            panel = null
+        }
     }
 
     // 进度轮询：拖动期间不覆盖预览值，其余时间跟随引擎（PlayerEngine 只有 getter）
@@ -482,11 +572,31 @@ fun DetailPreviewPlayer(
     // 有错误就没有画面，此时不挂手势层：让详情页的纵向滚动能从这一格正常划过去
     val interactive = engine != null && previewErrorText == null && engineErrorText == null
 
+    // 画面比例（全屏「更多 → 比例」）：Fit/Fill/Zoom 交给 Exo 的 resizeMode，16:9 / 4:3 锁一个
+    // 宽高比的盒子 + FILL。两者都只是显示参数，切换不重建引擎（与播放页同一份规则）
+    val fixedRatio: Float? = when (aspectMode) {
+        AspectMode.Ratio16x9 -> 16f / 9f
+        AspectMode.Ratio4x3 -> 4f / 3f
+        else -> null
+    }
+    val resizeMode = when (aspectMode) {
+        AspectMode.Fit -> AspectRatioFrameLayout.RESIZE_MODE_FIT
+        AspectMode.Fill -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+        AspectMode.Zoom -> AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+        AspectMode.Ratio16x9, AspectMode.Ratio4x3 -> AspectRatioFrameLayout.RESIZE_MODE_FILL
+    }
+
     Box(
         modifier
-            .fillMaxWidth()
-            .aspectRatio(16f / 9f)
-            .clip(RoundedCornerShape(14.dp))
+            // 同一个节点、两种外框：非全屏是 16:9 卡片（高度必须与详情页那个 Spacer 一致），
+            // 全屏是整块屏幕。**只换 Modifier**，所以 Surface 不会被拆掉重建
+            .then(
+                if (fullscreen) {
+                    Modifier.fillMaxSize()
+                } else {
+                    Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(14.dp))
+                },
+            )
             .background(Color.Black),
     ) {
         // 1) 画面 / 加载 / 错误，三选一
@@ -515,7 +625,15 @@ fun DetailPreviewPlayer(
                 modifier = Modifier.fillMaxSize(),
             )
 
-            else -> VideoSurface(engine = engine, modifier = Modifier.fillMaxSize())
+            else -> VideoSurface(
+                engine = engine,
+                resizeMode = resizeMode,
+                modifier = if (fixedRatio != null) {
+                    Modifier.fillMaxSize().aspectRatio(fixedRatio)
+                } else {
+                    Modifier.fillMaxSize()
+                },
+            )
         }
 
         // 2) 手势层：**一段** pointerInput，单击与纵滑在同一段里分派。
@@ -596,172 +714,318 @@ fun DetailPreviewPlayer(
             )
         }
 
-        // 3) 返回：**纯图标**，绝对定位在卡片左上角（start 12 / top 12，固定值）。
-        //    它刻意**不挂**在上面那条渐变 Row 里：那条带子的高度会随 CastStatusChip 出现/消失、
-        //    随控件层显隐变化，一旦共用布局，返回就会跟着上下跳——这是用户截图里"跳来跳去"的来源。
-        //    没有圆底、没有边框、没有背景块（"应该就是一个图标"）；
-        //    用一层 1dp 的暗色副本当很轻的投影，保证亮画面上还看得见，也不破坏纯图标的观感。
-        Box(
-            Modifier
-                .align(Alignment.TopStart)
-                .padding(start = 12.dp, top = 12.dp)
-                // 触控区仍 44dp；clip 只给水波纹一个形状，不画任何背景
-                .size(44.dp)
-                .clip(CircleShape)
-                .clickable(onClick = onBack),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                contentDescription = null,
-                tint = Color(0x59000000),
-                modifier = Modifier.size(26.dp).offset(y = 1.dp),
-            )
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                contentDescription = stringResource(R.string.search_back),
-                tint = ModaColors.Text,
-                modifier = Modifier.size(26.dp),
-            )
-        }
-
-        // 4) 顶部控制带：只承载右侧的投屏/倍速（返回已经独立在 3)），整宽、贴卡片边缘、
-        //    **无圆角无左右 margin**。背景自上而下收黑（0xCC000000 → 全透明）：
-        //    不是一块浮在画面上的深色贴纸，而是画面自己暗下去——片头黑底时看不出边界。
-        //    带子里没有任何常驻内容，所以它随控件层一起出现/消失，高度变化与返回无关。
-        //    top 也给 12dp：右侧两颗图标的顶边与返回按钮对齐，三者不会错开。
-        if (controlsVisible) {
-            Row(
+        // 小屏四角：返回常驻 + 右上投屏/倍速 + 底行（播放/暂停 · 时间 · 进度条 · 总时长 · 全屏）。
+        // 全屏时整段不组合——全屏用下面那套大屏控件（ui/player），两套不会同时在屏上，
+        // 也就不会出现"两颗返回/两条进度条"的争抢。
+        if (!fullscreen) {
+            // 3) 返回：**纯图标**，绝对定位在卡片左上角（start 12 / top 12，固定值）。
+            //    它刻意**不挂**在上面那条渐变 Row 里：那条带子的高度会随 CastStatusChip 出现/消失、
+            //    随控件层显隐变化，一旦共用布局，返回就会跟着上下跳——这是用户截图里"跳来跳去"的来源。
+            //    没有圆底、没有边框、没有背景块（"应该就是一个图标"）；
+            //    用一层 1dp 的暗色副本当很轻的投影，保证亮画面上还看得见，也不破坏纯图标的观感。
+            Box(
                 Modifier
-                    .fillMaxWidth()
-                    .align(Alignment.TopCenter)
-                    // 1 = 控制层，压在手势层（0）之上
-                    .zIndex(1f)
-                    .background(
-                        Brush.verticalGradient(listOf(Color(0xCC000000), Color(0x00000000))),
-                    )
-                    // 带子空白处自己吃掉点击：否则点在图标之间的缝隙会穿透到下面那层
-                    // "点画面显隐"，表现为"点控制条反而把它收起来了"
-                    .pointerInput(Unit) { detectTapGestures { } }
-                    .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
-                verticalAlignment = Alignment.CenterVertically,
+                    .align(Alignment.TopStart)
+                    .padding(start = 12.dp, top = 12.dp)
+                    // 触控区仍 44dp；clip 只给水波纹一个形状，不画任何背景
+                    .size(44.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onBack),
+                contentAlignment = Alignment.Center,
             ) {
-                // 投屏中额外挂一条「正在投屏到 X」：投到电视之后手机是黑的，
-                // 不写出来用户没法确认自己投成功了没有
-                casting?.let { device ->
-                    CastStatusChip(deviceName = device.friendlyName, modifier = Modifier.widthIn(max = 132.dp))
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = null,
+                    tint = Color(0x59000000),
+                    modifier = Modifier.size(26.dp).offset(y = 1.dp),
+                )
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = stringResource(R.string.search_back),
+                    tint = ModaColors.Text,
+                    modifier = Modifier.size(26.dp),
+                )
+            }
+
+            // 4) 顶部控制带：只承载右侧的投屏/倍速（返回已经独立在 3)），整宽、贴卡片边缘、
+            //    **无圆角无左右 margin**。背景自上而下收黑（0xCC000000 → 全透明）：
+            //    不是一块浮在画面上的深色贴纸，而是画面自己暗下去——片头黑底时看不出边界。
+            //    带子里没有任何常驻内容，所以它随控件层一起出现/消失，高度变化与返回无关。
+            //    top 也给 12dp：右侧两颗图标的顶边与返回按钮对齐，三者不会错开。
+            if (controlsVisible) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .align(Alignment.TopCenter)
+                        // 1 = 控制层，压在手势层（0）之上
+                        .zIndex(1f)
+                        .background(
+                            Brush.verticalGradient(listOf(Color(0xCC000000), Color(0x00000000))),
+                        )
+                        // 带子空白处自己吃掉点击：否则点在图标之间的缝隙会穿透到下面那层
+                        // "点画面显隐"，表现为"点控制条反而把它收起来了"
+                        .pointerInput(Unit) { detectTapGestures { } }
+                        .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    // 投屏中额外挂一条「正在投屏到 X」：投到电视之后手机是黑的，
+                    // 不写出来用户没法确认自己投成功了没有
+                    casting?.let { device ->
+                        CastStatusChip(deviceName = device.friendlyName, modifier = Modifier.widthIn(max = 132.dp))
+                    }
+                    CornerIcon(
+                        icon = Icons.Filled.Cast,
+                        description = stringResource(R.string.m_player_cast_title),
+                        tint = if (casting != null) ModaColors.Accent else Color.White,
+                        onClick = {
+                            castFailure = false
+                            castSheetVisible = true
+                        },
+                    )
+                    CornerIcon(
+                        icon = Icons.Filled.Speed,
+                        description = stringResource(R.string.player_speed),
+                        onClick = { speedSheetVisible = true },
+                    )
                 }
-                CornerIcon(
-                    icon = Icons.Filled.Cast,
-                    description = stringResource(R.string.m_player_cast_title),
-                    tint = if (casting != null) ModaColors.Accent else Color.White,
-                    onClick = {
-                        castFailure = false
-                        castSheetVisible = true
-                    },
-                )
-                CornerIcon(
-                    icon = Icons.Filled.Speed,
-                    description = stringResource(R.string.player_speed),
-                    onClick = { speedSheetVisible = true },
-                )
+            }
+
+            // 5) 底部控制带：整宽、贴卡片边缘、无圆角无 margin（圆角只来自卡片 clip(14dp)），
+            //    背景自下而上收黑（全透明 → 0xE6000000）。
+            //    一行排完：播放/暂停 · 当前时间 · 进度条 · 总时长 · 全屏。
+            //    全屏**并进这一行**而不是浮在画面里：它原本紧贴在进度条上方，两条虚线一样近，
+            //    挤在 16:9 的那点高度上谁都读不清；进来之后右侧只有 12dp 内边距。
+            if (controlsVisible) {
+                val maxMs = durationMs.coerceAtLeast(1L)
+                val shownMs = if (scrubbing) scrubMs else positionMs
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .align(Alignment.BottomCenter)
+                        // 1 = 控制层，压在手势层（0）之上。**这一条是"点得到"的关键**：
+                        // 行内 Slider/按钮之外的缝隙原本没有命中目标，点击会落到手势层被当成
+                        // "点画面"——现在由这一行的 pointerInput 兜住，落在控制条上永远只属于控制条。
+                        .zIndex(1f)
+                        .background(
+                            Brush.verticalGradient(listOf(Color(0x00000000), Color(0xE6000000))),
+                        )
+                        .pointerInput(Unit) { detectTapGestures { } }
+                        .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    // 播放/暂停：与全屏页一样是"控制层里的第一颗"，不再是单击画面的语义
+                    Box(
+                        Modifier
+                            .size(44.dp)
+                            .clip(CircleShape)
+                            .clickable {
+                                togglePlay()
+                                touchControls()
+                            },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
+                            // 与全屏页底栏同一条约定：这颗图标不单独写描述，时长与进度紧挨着它
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(26.dp),
+                        )
+                    }
+                    // 时间文字给最小宽度 + 居中：0:07 → 1:02:07 时宽度变化不会让整行抖一下
+                    Text(
+                        text = formatClock(shownMs),
+                        style = ModaType.Caption,
+                        color = Color.White,
+                        maxLines = 1,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.widthIn(min = 44.dp),
+                    )
+                    Slider(
+                        value = shownMs.coerceIn(0L, maxMs).toFloat(),
+                        valueRange = 0f..maxMs.toFloat(),
+                        // 拖：只更新预览值（shownMs 走 scrubMs），并重置收起计时
+                        onValueChange = { value ->
+                            scrubbing = true
+                            scrubMs = value.toLong()
+                            touchControls()
+                        },
+                        // 松手才 seek：拖动中每帧 seek 会把播放器拖死（与全屏页同规矩）
+                        onValueChangeFinished = {
+                            engine?.seekTo(scrubMs)
+                            positionMs = scrubMs
+                            scrubbing = false
+                            touchControls()
+                        },
+                        // 仍是唯一的可伸缩元素：多了全屏一颗之后也不许把进度条挤没
+                        modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
+                    )
+                    Text(
+                        text = formatClock(durationMs),
+                        style = ModaType.Caption,
+                        color = Color.White,
+                        maxLines = 1,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.widthIn(min = 44.dp),
+                    )
+                    // 全屏：行尾一颗，44dp 触控区 / 22dp 图标，与行内其它元素同一条中线
+                    Box(
+                        Modifier
+                            .size(44.dp)
+                            .clip(CircleShape)
+                            .clickable(onClick = onEnterFullscreen),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.Fullscreen,
+                            contentDescription = stringResource(R.string.danmaku_region_full),
+                            tint = Color.White,
+                            modifier = Modifier.size(22.dp),
+                        )
+                    }
+                }
             }
         }
 
-        // 5) 底部控制带：整宽、贴卡片边缘、无圆角无 margin（圆角只来自卡片 clip(14dp)），
-        //    背景自下而上收黑（全透明 → 0xE6000000）。
-        //    一行排完：播放/暂停 · 当前时间 · 进度条 · 总时长 · 全屏。
-        //    全屏**并进这一行**而不是浮在画面里：它原本紧贴在进度条上方，两条虚线一样近，
-        //    挤在 16:9 的那点高度上谁都读不清；进来之后右侧只有 12dp 内边距。
-        if (controlsVisible) {
-            val maxMs = durationMs.coerceAtLeast(1L)
-            val shownMs = if (scrubbing) scrubMs else positionMs
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .align(Alignment.BottomCenter)
-                    // 1 = 控制层，压在手势层（0）之上。**这一条是"点得到"的关键**：
-                    // 行内 Slider/按钮之外的缝隙原本没有命中目标，点击会落到手势层被当成
-                    // "点画面"——现在由这一行的 pointerInput 兜住，落在控制条上永远只属于控制条。
-                    .zIndex(1f)
-                    .background(
-                        Brush.verticalGradient(listOf(Color(0x00000000), Color(0xE6000000))),
-                    )
-                    .pointerInput(Unit) { detectTapGestures { } }
-                    .padding(start = 12.dp, end = 12.dp, top = 12.dp, bottom = 8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                // 播放/暂停：与全屏页一样是"控制层里的第一颗"，不再是单击画面的语义
-                Box(
-                    Modifier
-                        .size(44.dp)
-                        .clip(CircleShape)
-                        .clickable {
-                            togglePlay()
+        // 5b) 全屏控件集：**直接复用 ui/player/Controls.kt**（PlayerTopBar / PlayerBottomBar 与
+        //     PlayerSheet 系列），不在这里另写一套大屏控件。
+        //     引擎与 Surface 一律不动：这一整段只画控件，不 acquire / 不 start / 不 release。
+        if (fullscreen) {
+            if (!locked) {
+                PlayerTopBar(
+                    title = title,
+                    episodeLabel = episodeLabel,
+                    // 这个形参是"当前锁没锁"，由 locked 画锁形；本分支只在未锁时组合，
+                    // 所以恒传 false，点一下就是"锁上"（锁定后整屏只剩解锁入口）
+                    locked = false,
+                    casting = casting != null,
+                    castDeviceName = casting?.friendlyName,
+                    // 顶栏那颗返回 = 退出全屏（不是退出页面）：与系统返回键的分层一致
+                    onBack = onExitFullscreen,
+                    onToggleLock = { locked = true },
+                    onCastClick = {
+                        castFailure = false
+                        castSheetVisible = true
+                    },
+                    modifier = Modifier.align(Alignment.TopCenter).zIndex(2f),
+                )
+                PlayerBottomBar(
+                    playing = playing,
+                    positionMs = positionMs,
+                    durationMs = durationMs,
+                    // 倍速只作状态提示；1.0 不写，否则底栏永远挂一句"1.0x"
+                    speedLabel = if (speed != 1f) speedLabelOf(speed) else null,
+                    onTogglePlay = {
+                        togglePlay()
+                        touchControls()
+                    },
+                    // 下一集**恒置灰**：换集 = 换地址 = 换源，而换源必然重建引擎，
+                    // 本轮明令"引擎与 Surface 都不许动"，所以这颗按钮在这里不承担切集
+                    // （切集的正路是选集轨道 / 选集面板 → 去播放页）
+                    onNextEpisode = {},
+                    nextEpisodeEnabled = false,
+                    // 拖动预览由 PlayerBottomBar 自己画（它内部有 dragging 状态），这里只重置收起计时
+                    onSeekPreview = { touchControls() },
+                    onSeekCommit = { ms ->
+                        engine?.seekTo(ms)
+                        positionMs = ms
+                        touchControls()
+                    },
+                    onOpenPanel = { next ->
+                        // 没有集数表时"选集"面板开出来是空表：干脆不响应，别给一张空白面板
+                        if (next != PlayerPanel.Episode || episodes.isNotEmpty()) {
                             touchControls()
-                        },
-                    contentAlignment = Alignment.Center,
+                            panel = next
+                        }
+                    },
+                    // 详情页拿不到弹幕数据（弹幕跟着播放页的 vid 走），也没有弹幕层可渲染：
+                    // 这颗开关这一轮"无数据可切"，接线留到播放页路由退役时一起做
+                    danmakuEnabled = false,
+                    onToggleDanmaku = {},
+                    modifier = Modifier.align(Alignment.BottomCenter).zIndex(2f),
+                )
+            } else {
+                // 锁定态：整屏只留这一个出口，绝不弹整个控制层
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Box(
+                        Modifier
+                            .clip(CircleShape)
+                            .background(Color(0xB3000000))
+                            .clickable {
+                                locked = false
+                                touchControls()
+                            }
+                            .padding(20.dp),
+                    ) {
+                        Icon(
+                            imageVector = Icons.Filled.LockOpen,
+                            contentDescription = null,
+                            tint = Color.White,
+                        )
+                    }
+                }
+            }
+
+            // 底部面板：一次只开一个。ModalBottomSheet 挂在窗口上，天然盖住手势层与控制层。
+            // 只摆这一页**真的能生效**的那几张：弹幕 / 内核 / 解码 / 片头片尾的数据与生效路径
+            // 都在播放页（VM 与 PlayerSettings），在这里摆出来就是一排按不动的按钮。
+            when (panel) {
+                PlayerPanel.Episode -> EpisodeSheet(
+                    episodes = episodes,
+                    currentEpisodeIndex = episodeIndex,
+                    onSelect = { episode ->
+                        panel = null
+                        onSelectEpisode(episode)
+                    },
+                    onClose = { panel = null },
+                )
+
+                PlayerPanel.Quality -> QualitySheet(
+                    // 本页拿不到档位表（DetailPreview 只带一条地址），也不许在这里切档：
+                    // 换档 = 换地址 = 重建引擎，本轮禁止。面板于是如实显示"无可选清晰度"
+                    tiers = emptyList(),
+                    selected = null,
+                    onPick = {},
+                    onClose = { panel = null },
+                )
+
+                PlayerPanel.Speed -> SpeedSheet(
+                    speed = speed,
+                    onPick = { value ->
+                        // 与底栏/全屏页同一语义：即改即生效，面板自己不负责关闭
+                        speed = value
+                        engine?.setSpeed(value)
+                        onSpeedChange(value)
+                    },
+                    onClose = { panel = null },
+                )
+
+                PlayerPanel.Aspect -> AspectSheet(
+                    mode = aspectMode,
+                    onPick = { mode -> aspectMode = mode },
+                    onClose = { panel = null },
+                )
+
+                // 「更多」：同一个 PlayerSheet 骨架（同宽、同标题栏、同 chip 尺寸），
+                // 只放上面几张之外的、这一页真能生效的项（目前只有画面比例）
+                PlayerPanel.More -> PlayerSheet(
+                    title = stringResource(R.string.m_player_more),
+                    onClose = { panel = null },
                 ) {
-                    Icon(
-                        imageVector = if (playing) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                        // 与全屏页底栏同一条约定：这颗图标不单独写描述，时长与进度紧挨着它
-                        contentDescription = null,
-                        tint = Color.White,
-                        modifier = Modifier.size(26.dp),
+                    SheetOption(
+                        label = panelLabel(PlayerPanel.Aspect),
+                        selected = false,
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = { panel = PlayerPanel.Aspect },
                     )
                 }
-                // 时间文字给最小宽度 + 居中：0:07 → 1:02:07 时宽度变化不会让整行抖一下
-                Text(
-                    text = formatClock(shownMs),
-                    style = ModaType.Caption,
-                    color = Color.White,
-                    maxLines = 1,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.widthIn(min = 44.dp),
-                )
-                Slider(
-                    value = shownMs.coerceIn(0L, maxMs).toFloat(),
-                    valueRange = 0f..maxMs.toFloat(),
-                    // 拖：只更新预览值（shownMs 走 scrubMs），并重置收起计时
-                    onValueChange = { value ->
-                        scrubbing = true
-                        scrubMs = value.toLong()
-                        touchControls()
-                    },
-                    // 松手才 seek：拖动中每帧 seek 会把播放器拖死（与全屏页同规矩）
-                    onValueChangeFinished = {
-                        engine?.seekTo(scrubMs)
-                        positionMs = scrubMs
-                        scrubbing = false
-                        touchControls()
-                    },
-                    // 仍是唯一的可伸缩元素：多了全屏一颗之后也不许把进度条挤没
-                    modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
-                )
-                Text(
-                    text = formatClock(durationMs),
-                    style = ModaType.Caption,
-                    color = Color.White,
-                    maxLines = 1,
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.widthIn(min = 44.dp),
-                )
-                // 全屏：行尾一颗，44dp 触控区 / 22dp 图标，与行内其它元素同一条中线
-                Box(
-                    Modifier
-                        .size(44.dp)
-                        .clip(CircleShape)
-                        .clickable(onClick = onEnterFullscreen),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(
-                        imageVector = Icons.Filled.Fullscreen,
-                        contentDescription = stringResource(R.string.danmaku_region_full),
-                        tint = Color.White,
-                        modifier = Modifier.size(22.dp),
-                    )
-                }
+
+                PlayerPanel.Danmaku,
+                PlayerPanel.Core,
+                PlayerPanel.Decoder,
+                PlayerPanel.Marks,
+                null -> Unit
             }
         }
 
@@ -818,7 +1082,12 @@ fun DetailPreviewPlayer(
  * 取不到就返回 null（PlayerView.player = null 只是黑屏，不会崩）。
  */
 @Composable
-private fun VideoSurface(engine: PlayerEngine, modifier: Modifier = Modifier) {
+private fun VideoSurface(
+    engine: PlayerEngine,
+    /** 比例档位翻出来的 Exo resizeMode：换它只改一次缩放入参，不重建 Surface */
+    resizeMode: Int = AspectRatioFrameLayout.RESIZE_MODE_FIT,
+    modifier: Modifier = Modifier,
+) {
     AndroidView(
         factory = { ctx ->
             PlayerView(ctx).apply {
@@ -829,7 +1098,7 @@ private fun VideoSurface(engine: PlayerEngine, modifier: Modifier = Modifier) {
         },
         update = {
             it.player = exoPlayerOf(engine)
-            it.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+            it.resizeMode = resizeMode
         },
         // 引擎还归会话所有（切到播放页那一瞬间）就不要摘：播放页刚把同一个 ExoPlayer
         // 绑到它自己的 PlayerView 上，这一摘会让新画面黑一帧到一秒——看起来正是"又在缓冲"

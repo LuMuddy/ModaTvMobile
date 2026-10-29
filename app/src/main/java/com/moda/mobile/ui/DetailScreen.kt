@@ -49,6 +49,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.zIndex
 import com.moda.mobile.R
 import com.moda.mobile.model.AppError
 import com.moda.mobile.model.Episode
@@ -86,11 +87,20 @@ private val VipGold = Color(0xFFE0A32E)
  * 剧集详情：顶部小屏播放器 + 片名 + 收藏/可展开简介 + 单行横向选集轨道。
  *
  * 顶部那块**真的能播**（[DetailPreviewPlayer]）：进页面就播续播集（没有历史就第 1 集），
- * 可播放/暂停、纵滑调亮度与音量、投屏、进全屏。它就是「两种播放形态」里的小屏形态，
- * 与全屏播放页各自有一条投屏入口。点集号**不**切小屏的片源——那只意味着"去全屏看这一集"。
+ * 可播放/暂停、纵滑调亮度与音量、投屏、进全屏。点集号**不**切小屏的片源——那只意味着"去全屏看这一集"。
  *
- * 整页是一个 LazyColumn：每个 item 都是满宽，纵向滚动只归它。
- * 选集是其中**一格 item**，内部是单行横向 LazyRow（一屏露 3 个、右滑看更多）。
+ * 页面骨架 = root Box 里「一个播放器节点 + 两层布局」，**不是**两个播放器调用点：
+ *    Box(fillMaxSize) {
+ *        if (!fullscreen) { Column { Spacer(16:9 占位) ; 可滚动内容 } }
+ *        DetailPreviewPlayer(Modifier 随 fullscreen 在「16:9 卡片」与「整屏」之间切换)
+ *    }
+ * 播放器始终是 root Box 的**同一个**子节点，所以小屏 ↔ 全屏只换 Modifier：
+ * 换路由/换调用点都会让 Surface 被拆掉重建，用户看到的就是一帧黑再重贴。
+ * 代价是内容区要在播放器下面单独占位（Spacer 与播放器同一条 Modifier 链），
+ * 那条链的顺序与数值不许各自改动。
+ *
+ * 内容区是一个 LazyColumn：每个 item 都是满宽，纵向滚动只归它（滚动位置记在页面这一层，
+ * 进出全屏不会被丢掉）。选集是其中**一格 item**，内部是单行横向 LazyRow（一屏露 3 个、右滑看更多）。
  * 两者方向正交，各吃各的手势，不会互相抢——这也是选集能做成独立轨道的前提；
  * 反过来说，同方向的嵌套滚动（比如页面纵向里再套一个纵向网格）在触摸端必然打架，不要加。
  *
@@ -209,31 +219,33 @@ fun DetailScreen(
     val trailerKeys = stringResource(R.string.m_feed_trailer_keywords).split('|')
     fun isTrailer(ep: Episode) = trailerKeys.any { it.isNotBlank() && ep.label.contains(it) }
 
-    Column(Modifier.fillMaxSize().background(ModaColors.Bg)) {
-        // 这一页**没有页面级返回条**：返回只由播放器卡片左上角那颗提供。
-        // 所以卡片必须在所有状态下都在组合里（见下面的 detail == null 分支）——
-        // 加载中/失败/空态也照画，只是它内部落成 loading / 错误面板。
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            when {
-                // 三态都渲染同一张卡片：它是这一页唯一的返回出口，
-                // 一旦哪一态跳过它，那一屏就没有返回了（只剩系统返回手势）。
-                // 状态文案挂在卡片下面，卡片本身按 loading / error 走自己的分支。
-                detail == null -> Column(Modifier.fillMaxSize()) {
-                    DetailPreviewPlayer(
-                        title = stringResource(R.string.detail_untitled),
-                        // 还没拿到这部剧：不喂任何地址，卡片内部显示"正在准备播放…"或错误面板
-                        preview = null,
-                        loading = loading,
-                        error = error,
-                        episodeIndex = -1,
-                        onRetry = { onRetry?.invoke() ?: onBack() },
-                        onBack = onBack,
-                        // 没有集数：全屏无处可去，屏上的空态会说明原因
-                        onEnterFullscreen = {},
-                        modifier = Modifier.padding(horizontal = 16.dp),
-                    )
-                    // loading 与失败都由卡片自己说清楚了（它内部有那两个分支），
-                    // 只剩"既不在加载、也没报错、就是没内容"这一种要在下面补一句 + 重试。
+    val playerTitle = detail?.title?.takeIf { it.isNotBlank() }
+        ?: stringResource(R.string.detail_untitled)
+
+    // 全屏是**页面内部状态**（对外签名不变）。它只决定两件事：播放器拿哪个 Modifier、
+    // 下面这一屏内容是否组合。播放器节点本身**始终在 root Box 的同一个槽位**——
+    // 换布局不换节点，Surface 就不会被拆掉重贴（黑帧正是从"拆掉重贴"来的）。
+    var fullscreen by remember(detail?.cid) { mutableStateOf(false) }
+
+    // 页面纵向滚动位置放在这一层：全屏时内容整段不组合，状态留在这里才不会连同位置一起丢掉
+    val pageState = rememberLazyListState()
+
+    Box(Modifier.fillMaxSize().background(ModaColors.Bg)) {
+        // 非全屏 = 占位 + 可滚动的内容；全屏时整段不组合，触摸也就不会在画面底下抢
+        if (!fullscreen) {
+            Column(Modifier.fillMaxSize()) {
+                // 播放器占位：**与下面播放器那条 Modifier 链逐字对应**
+                // （fillMaxWidth → 左右 16dp → 16:9）。数值与顺序不许各自为政，
+                // 否则两边算出的高度差一截，就是"一条空洞"或者"播放器盖住标题"。
+                Spacer(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp)
+                        .aspectRatio(16f / 9f),
+                )
+                if (detail == null) {
+                    // 加载中/失败都由卡片自己说清楚（它内部有那两个分支），
+                    // 只剩"既不在加载、也没报错、就是没内容"这一种要在下面补一句 + 重试
                     if (!loading && error == null) {
                         Box(Modifier.weight(1f).fillMaxWidth()) {
                             EmptyState(
@@ -241,197 +253,177 @@ fun DetailScreen(
                                 onRetry = onRetry ?: onBack,
                             )
                         }
+                    } else {
+                        Spacer(Modifier.weight(1f))
                     }
-                }
-                // 整页只剩满宽 item（选集已经改成横向轨道，不再是网格里的一格），
-                // 所以容器是 LazyColumn 而不是 LazyVerticalGrid
-                else -> LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 24.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    // 顶部就是这一页的第一个满宽 item：进详情页先看到画面，而不是一张剧照
-                    item(key = "player") {
-                        DetailPreviewPlayer(
-                            title = detail.title.ifBlank { stringResource(R.string.detail_untitled) },
-                            preview = preview,
-                            loading = previewLoading,
-                            error = previewError,
-                            // -1 = 这部剧没有集数：播放器据此不写"第 N 集"
-                            episodeIndex = if (episodes.isEmpty()) -1 else previewIndex,
-                            // 重试就是让 VM 重装这一集的地址（不新造网络路径）
-                            onRetry = { loadPreviewNow(previewIndex) },
-                            onBack = onBack,
-                            // 全屏播"小屏正在播的这一集"：点这颗键的意图是"放大看清"，不是换集。
-                            // 没有集数时退回第一集；一集都没有就什么也不做（屏幕上已有空态说明）
-                            onEnterFullscreen = {
-                                val target = episodes.getOrNull(previewIndex) ?: episodes.firstOrNull()
-                                if (target != null) {
-                                    userTouched = true
-                                    onPlay(target)
-                                }
-                            },
-                        )
-                    }
-
-                    // 片名从播放器的覆盖层挪到这里：覆盖层收起时那行字就没了，而"我在看什么剧"
-                    // 是这一页最该一直可读的信息。不带集号——选集格子里写着集数，重复没有意义。
-                    // 片名为空（异常数据）时整个 item 不组合，不留一条空行。
-                    if (detail.title.isNotBlank()) {
-                        item(key = "title") {
-                            Text(
-                                text = detail.title,
-                                style = ModaType.Heading,
-                                color = ModaColors.Text,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
-                            )
-                        }
-                    }
-
-                    // 收藏（唯一入口）+ 可展开的剧情简介
-                    item(key = "actions") {
-                        DetailActions(
-                            detailCid = detail.cid,
-                            description = description,
-                            isFavorite = isFavorite,
-                            onToggleFavorite = onToggleFavorite,
-                        )
-                    }
-
-                    if (episodes.isEmpty()) {
-                        item(key = "no-episodes") {
-                            Text(
-                                text = stringResource(R.string.detail_no_episodes),
-                                style = ModaType.Body,
-                                color = ModaColors.Danger,
-                                modifier = Modifier.padding(top = 16.dp),
-                            )
-                        }
-                    } else if (showEpisodes) {
-                        item(key = "episodes-title") {
-                            Column(Modifier.fillMaxWidth().padding(top = 16.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    SectionTitle(stringResource(R.string.detail_episodes_title))
-                                    Spacer(Modifier.width(10.dp))
-                                    // 「共 N 集」：格子里只剩数字，总数必须有一处写清楚
-                                    Text(
-                                        text = stringResource(R.string.detail_episode_count, episodes.size),
-                                        style = ModaType.Caption,
-                                        color = ModaColors.TextDim,
-                                    )
-                                }
-                                // 分集描述（综艺看点/预告简介）从格子里搬到这一行：
-                                // 它是把格子撑高的元凶，而格子只留集号才排得下 6 列。
-                                // 固定显示「当前集」的那一条，不做逐集展示——逐集展示会变成一整个段落列表，
-                                // 又要把选集区顶到屏幕外。没有副标题时整行不组合。
-                                val summary = currentEpisode?.summary.orEmpty()
-                                if (summary.isNotBlank()) {
-                                    Spacer(Modifier.height(6.dp))
-                                    Text(
-                                        text = stringResource(
-                                            R.string.core_episode_index,
-                                            (currentEpisode?.index ?: 0) + 1,
-                                        ) + " · " + summary,
-                                        style = ModaType.Caption,
-                                        color = ModaColors.TextDim,
-                                        maxLines = 2,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                }
+                } else {
+                    // 整页只剩满宽 item（选集已经改成横向轨道，不再是网格里的一格），
+                    // 所以容器是 LazyColumn 而不是 LazyVerticalGrid
+                    LazyColumn(
+                        modifier = Modifier.fillMaxSize(),
+                        state = pageState,
+                        contentPadding = PaddingValues(start = 16.dp, end = 16.dp, bottom = 24.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        // 片名从播放器的覆盖层挪到这里：覆盖层收起时那行字就没了，而"我在看什么剧"
+                        // 是这一页最该一直可读的信息。不带集号——选集格子里写着集数，重复没有意义。
+                        // 片名为空（异常数据）时整个 item 不组合，不留一条空行。
+                        if (detail.title.isNotBlank()) {
+                            item(key = "title") {
+                                Text(
+                                    text = detail.title,
+                                    style = ModaType.Heading,
+                                    color = ModaColors.Text,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.fillMaxWidth().padding(top = 12.dp),
+                                )
                             }
                         }
-                    }
 
-                    // 选集：单行横向轨道，一屏露 3 个、右滑看更多。
-                    // 为什么不再用 3 列网格：竖着排会把播放器顶出屏幕，而"挑下一集"本来就是在
-                    // 一维序列里往前找；横向轨道一眼看到"当前这集左右各是哪几集"。
-                    // 手势不打架：轨道只吃横向、页面只吃纵向（正交嵌套滚动，Compose 原生支持），
-                    // 不给页面再套 horizontalScroll。
-                    if (showEpisodes) {
-                        item(key = "episodes") {
-                            // BoxWithConstraints 只为拿轨道的可用宽，格宽由它反算：
-                            // 一屏 3 格 + 两个 8dp 间距 ⇒ 格宽 = (可用宽 − 16dp) / 3。
-                            // 不写死 dp：320 / 360 / 411dp 的屏上都是正好一屏 3 个。
-                            // 左右 16dp 页边距由外层 LazyColumn 的 contentPadding 提供，轨道内部不加，
-                            // 所以第 1 集会贴到 16dp 处而不是浮在中间。
-                            BoxWithConstraints(Modifier.fillMaxWidth()) {
-                                val gap = 8.dp
-                                val cellWidth = (maxWidth - gap * 2) / EPISODES_PER_SCREEN
-                                // 让某一格居中需要的**负滚动偏移**（像素）：那一格左缘本来在 0，
-                                // 想让它居中就要把内容再往左滚 (可用宽 − 格宽) / 2。
-                                val sidePaddingPx = with(LocalDensity.current) {
-                                    ((maxWidth - cellWidth) / 2).roundToPx()
-                                }
-                                // 能居中就居中，到头就贴边：负偏移会被 LazyRow 自己的边界夹取吃掉
-                                // （第 1 集夹到 0 ⇒ 贴左；最后一集夹到 maxScroll ⇒ 贴右），
-                                // 所以这里不用再判断"是不是首末两集"，也就不会在两头留白。
-                                // userTouched 之后不再抢位置；下标双向夹取，历史漂移不会越界崩。
-                                LaunchedEffect(
-                                    detail?.cid,
-                                    resume?.loaded,
-                                    currentIndex,
-                                    userTouched,
-                                    sidePaddingPx,
-                                ) {
-                                    if (!userTouched) {
-                                        railState.scrollToItem(
-                                            index = currentIndex.coerceIn(0, episodes.lastIndex),
-                                            scrollOffset = -sidePaddingPx,
+                        // 收藏（唯一入口）+ 可展开的剧情简介
+                        item(key = "actions") {
+                            DetailActions(
+                                detailCid = detail.cid,
+                                description = description,
+                                isFavorite = isFavorite,
+                                onToggleFavorite = onToggleFavorite,
+                            )
+                        }
+
+                        if (episodes.isEmpty()) {
+                            item(key = "no-episodes") {
+                                Text(
+                                    text = stringResource(R.string.detail_no_episodes),
+                                    style = ModaType.Body,
+                                    color = ModaColors.Danger,
+                                    modifier = Modifier.padding(top = 16.dp),
+                                )
+                            }
+                        } else if (showEpisodes) {
+                            item(key = "episodes-title") {
+                                Column(Modifier.fillMaxWidth().padding(top = 16.dp)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        SectionTitle(stringResource(R.string.detail_episodes_title))
+                                        Spacer(Modifier.width(10.dp))
+                                        // 「共 N 集」：格子里只剩数字，总数必须有一处写清楚
+                                        Text(
+                                            text = stringResource(R.string.detail_episode_count, episodes.size),
+                                            style = ModaType.Caption,
+                                            color = ModaColors.TextDim,
                                         )
                                     }
-                                }
-                                LazyRow(
-                                    state = railState,
-                                    horizontalArrangement = Arrangement.spacedBy(gap),
-                                ) {
-                                    itemsIndexed(
-                                        items = episodes,
-                                        // 同一部剧可能同名同 vid 的重播条目，下标一起进 key 才唯一
-                                        key = { index, ep -> "ep-${ep.vid}-$index" },
-                                    ) { index, ep ->
-                                        EpisodeCell(
-                                            episode = ep,
-                                            selected = index == currentIndex,
-                                            completed = index in completedIndexes,
-                                            isVip = ep.isVip,
-                                            isTrailer = isTrailer(ep),
-                                            modifier = Modifier.width(cellWidth),
-                                            onClick = {
-                                                // 用户已经自己选了：钉住高亮，别让迟到的历史顶掉
-                                                userTouched = true
-                                                currentIndex = index
-                                                onPlay(ep)
-                                            },
+                                    // 分集描述（综艺看点/预告简介）从格子里搬到这一行：
+                                    // 它是把格子撑高的元凶，而格子只留集号才排得下 6 列。
+                                    // 固定显示「当前集」的那一条，不做逐集展示——逐集展示会变成一整个段落列表，
+                                    // 又要把选集区顶到屏幕外。没有副标题时整行不组合。
+                                    val summary = currentEpisode?.summary.orEmpty()
+                                    if (summary.isNotBlank()) {
+                                        Spacer(Modifier.height(6.dp))
+                                        Text(
+                                            text = stringResource(
+                                                R.string.core_episode_index,
+                                                (currentEpisode?.index ?: 0) + 1,
+                                            ) + " · " + summary,
+                                            style = ModaType.Caption,
+                                            color = ModaColors.TextDim,
+                                            maxLines = 2,
+                                            overflow = TextOverflow.Ellipsis,
                                         )
                                     }
                                 }
                             }
                         }
-                    }
 
-                    // 已有内容时的刷新/失败只在底部提示，不盖住整页：
-                    // 用户看到的仍然是能用的那一屏
-                    if (loading || error != null) {
-                        item(key = "footer") {
-                            Column(Modifier.fillMaxWidth().padding(top = 16.dp)) {
-                                if (loading) {
-                                    Text(
-                                        text = stringResource(R.string.detail_refreshing),
-                                        style = ModaType.Caption,
-                                        color = ModaColors.TextDim,
-                                    )
+                        // 选集：单行横向轨道，一屏露 3 个、右滑看更多。
+                        // 为什么不再用 3 列网格：竖着排会把播放器顶出屏幕，而"挑下一集"本来就是在
+                        // 一维序列里往前找；横向轨道一眼看到"当前这集左右各是哪几集"。
+                        // 手势不打架：轨道只吃横向、页面只吃纵向（正交嵌套滚动，Compose 原生支持），
+                        // 不给页面再套 horizontalScroll。
+                        if (showEpisodes) {
+                            item(key = "episodes") {
+                                // BoxWithConstraints 只为拿轨道的可用宽，格宽由它反算：
+                                // 一屏 3 格 + 两个 8dp 间距 ⇒ 格宽 = (可用宽 − 16dp) / 3。
+                                // 不写死 dp：320 / 360 / 411dp 的屏上都是正好一屏 3 个。
+                                // 左右 16dp 页边距由外层 LazyColumn 的 contentPadding 提供，轨道内部不加，
+                                // 所以第 1 集会贴到 16dp 处而不是浮在中间。
+                                BoxWithConstraints(Modifier.fillMaxWidth()) {
+                                    val gap = 8.dp
+                                    val cellWidth = (maxWidth - gap * 2) / EPISODES_PER_SCREEN
+                                    // 让某一格居中需要的**负滚动偏移**（像素）：那一格左缘本来在 0，
+                                    // 想让它居中就要把内容再往左滚 (可用宽 − 格宽) / 2。
+                                    val sidePaddingPx = with(LocalDensity.current) {
+                                        ((maxWidth - cellWidth) / 2).roundToPx()
+                                    }
+                                    // 能居中就居中，到头就贴边：负偏移会被 LazyRow 自己的边界夹取吃掉
+                                    // （第 1 集夹到 0 ⇒ 贴左；最后一集夹到 maxScroll ⇒ 贴右），
+                                    // 所以这里不用再判断"是不是首末两集"，也就不会在两头留白。
+                                    // userTouched 之后不再抢位置；下标双向夹取，历史漂移不会越界崩。
+                                    LaunchedEffect(
+                                        detail?.cid,
+                                        resume?.loaded,
+                                        currentIndex,
+                                        userTouched,
+                                        sidePaddingPx,
+                                    ) {
+                                        if (!userTouched) {
+                                            railState.scrollToItem(
+                                                index = currentIndex.coerceIn(0, episodes.lastIndex),
+                                                scrollOffset = -sidePaddingPx,
+                                            )
+                                        }
+                                    }
+                                    LazyRow(
+                                        state = railState,
+                                        horizontalArrangement = Arrangement.spacedBy(gap),
+                                    ) {
+                                        itemsIndexed(
+                                            items = episodes,
+                                            // 同一部剧可能同名同 vid 的重播条目，下标一起进 key 才唯一
+                                            key = { index, ep -> "ep-${ep.vid}-$index" },
+                                        ) { index, ep ->
+                                            EpisodeCell(
+                                                episode = ep,
+                                                selected = index == currentIndex,
+                                                completed = index in completedIndexes,
+                                                isVip = ep.isVip,
+                                                isTrailer = isTrailer(ep),
+                                                modifier = Modifier.width(cellWidth),
+                                                onClick = {
+                                                    // 用户已经自己选了：钉住高亮，别让迟到的历史顶掉
+                                                    userTouched = true
+                                                    currentIndex = index
+                                                    onPlay(ep)
+                                                },
+                                            )
+                                        }
+                                    }
                                 }
-                                if (error != null) {
-                                    Spacer(Modifier.height(10.dp))
-                                    Text(appErrorText(error), style = ModaType.Body, color = ModaColors.Danger)
-                                    Spacer(Modifier.height(10.dp))
-                                    ActionButton(
-                                        text = stringResource(R.string.detail_retry),
-                                        onClick = { onRetry?.invoke() ?: onBack() },
-                                        primary = true,
-                                    )
+                            }
+                        }
+
+                        // 已有内容时的刷新/失败只在底部提示，不盖住整页：
+                        // 用户看到的仍然是能用的那一屏
+                        if (loading || error != null) {
+                            item(key = "footer") {
+                                Column(Modifier.fillMaxWidth().padding(top = 16.dp)) {
+                                    if (loading) {
+                                        Text(
+                                            text = stringResource(R.string.detail_refreshing),
+                                            style = ModaType.Caption,
+                                            color = ModaColors.TextDim,
+                                        )
+                                    }
+                                    if (error != null) {
+                                        Spacer(Modifier.height(10.dp))
+                                        Text(appErrorText(error), style = ModaType.Body, color = ModaColors.Danger)
+                                        Spacer(Modifier.height(10.dp))
+                                        ActionButton(
+                                            text = stringResource(R.string.detail_retry),
+                                            onClick = { onRetry?.invoke() ?: onBack() },
+                                            primary = true,
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -439,6 +431,50 @@ fun DetailScreen(
                 }
             }
         }
+
+        // ⚠ 全文**唯一**的播放器调用点：小屏与全屏共用这一个节点，只换 Modifier。
+        // 它在**所有**数据状态下都在组合里（loading / 失败 / 空态也在）：
+        // 非全屏时这颗卡片左上角的返回是这一页唯一的返回出口，漏掉任何一态都会让那一屏
+        // 只剩系统返回手势。
+        // 非全屏 = 16:9 卡片（高度与上面那个 Spacer 严丝合缝）；
+        // 全屏 = 整块屏幕，压在内容之上（内容本来就不组合，zIndex 只是保险）。
+        // 这里**不换路由**：换路由就要新建 Surface，用户看到的就是一帧黑再重贴。
+        DetailPreviewPlayer(
+            title = playerTitle,
+            // 还没拿到这部剧：不喂任何地址，卡片内部显示"正在准备播放…"或错误面板
+            preview = if (detail == null) null else preview,
+            loading = if (detail == null) loading else previewLoading,
+            error = if (detail == null) error else previewError,
+            // -1 = 这部剧没有集数：播放器据此不写"第 N 集"
+            episodeIndex = if (detail == null || episodes.isEmpty()) -1 else previewIndex,
+            // 重试就是让 VM 重装这一集的地址（不新造网络路径）
+            onRetry = {
+                if (detail == null) onRetry?.invoke() ?: onBack() else loadPreviewNow(previewIndex)
+            },
+            onBack = onBack,
+            // 全屏按钮 = 只改布局。以前这里 push 播放页路由（→ 新 Surface → 黑帧），
+            // 现在留在本页换一颗 Modifier；播放页路由只留给选集里"去大屏看这一集"
+            onEnterFullscreen = { fullscreen = true },
+            onExitFullscreen = { fullscreen = false },
+            fullscreen = fullscreen,
+            // 全屏"选集"面板的数据源。点一集仍然走页面既有的出口（进播放页看这一集）
+            episodes = episodes,
+            onSelectEpisode = { episode ->
+                userTouched = true
+                onPlay(episode)
+            },
+            modifier = Modifier
+                .align(Alignment.TopStart)
+                .zIndex(if (fullscreen) 2f else 1f)
+                .then(
+                    if (fullscreen) {
+                        Modifier.fillMaxSize()
+                    } else {
+                        // 与上面那个 Spacer 同一条链、同一个顺序：高度必须严丝合缝
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+                    },
+                ),
+        )
     }
 }
 
@@ -563,7 +599,6 @@ private fun EpisodeCell(
             RemoteImage(
                 url = episode.cover,
                 title = episode.label,
-                preferHiRes = false,
                 modifier = Modifier.fillMaxSize(),
                 corner = 8.dp,
             )
