@@ -11,7 +11,7 @@
    `https://open.weixin.qq.com/connect/confirm?uuid=<uuid>`）；`wx_qr → wx_poll → activate` 三条逻辑照抄 TV 端。
 4. 播放器：横屏全屏 + 手势（单击显隐控制层、双击左/右快退快进、横滑调进度、纵滑左亮度右音量），
    九项能力（内核/解码/清晰度/选集/倍速/弹幕/比例/片头片尾/返回）以底部按钮 + 面板抽屉承载。
-5. 自更新：保留链路，asset 名换成 `ModaMobile<version>.apk`（同仓库 releases）。
+5. 自更新：保留链路，asset 名换成 `ModaMobile<version>.apk`，发在本仓库（ModaTvMobile）的 releases，不与 TV 共用 Release 仓库。
 6. 验收：`./gradlew assembleDebug` 绿 + 装模拟器跑通关键路径。
 
 ## 1. 假设（执行中按此推进，遇到冲突回报而非自行推翻）

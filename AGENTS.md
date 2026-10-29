@@ -119,7 +119,7 @@ ui/*Screen.kt ──▶ MainViewModel ──▶ Repo ──▶ Api / CarouselSou
 
 ## 自更新
 
-- 手机端**只认自己的发布资产**：`version-mobile.json` + `ModaMobile<版本>.apk`（同一个 release 仓库，与 TV 端隔离）。
+- 手机端**只认自己的发布资产**：`version-mobile.json` + `ModaMobile<版本>.apk`，发在**本仓库**（ModaTvMobile）的 Release 上——与 TV 端的 ModaTv 仓库整仓隔离，不共用一个 Release。
 - **绝不回退去读 TV 的 `version.json` / `releases.atom`**——那会把 TV 的版本说明弹到手机上（踩过）。
 - 资产不存在 → 静默「已是最新」；只有**网络异常**才允许报错。
 

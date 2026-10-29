@@ -13,7 +13,8 @@ import org.json.JSONObject
 /**
  * 版本检查的取数层：只读**手机端专属**的 version-mobile.json。
  *
- * 为什么不再读 `version.json` / `releases.atom`：这两份都是 **TV 端**的发布票据。
+ * 为什么不再读 `version.json` / `releases.atom`：这两份都是 **TV 端**的发布票据
+ * （而且 TV 端的流水线只往 ModaTv 那个仓库发，手机端的资产在自己的 ModaTvMobile 仓库里）。
  * 手机端和 TV 端的版本号本来就不该同步，共用一份票据的直接后果是真机复现过的那次故障——
  * v1.0.0 的手机弹出了 TV 的 v1.0.2 更新说明（「登录改为微信扫码…电视上出二维码」），
  * 点「立即更新」再去下 `ModaMobile1.0.2.apk`，而那个资产根本不存在。
@@ -30,15 +31,21 @@ object UpdateSource {
 
     private const val TAG = "UpdateSource"
 
+    /**
+     * 手机端的仓库是**独立**的（ModaTvMobile），不挂在 TV 那个 Release 仓库上。
+     * 资产靠仓库隔离，而不是靠文件名区分：TV 端那条流水线只往 ModaTv 发，
+     * 手机端这条只往 ModaTvMobile 发，两边的 tag 也是各打各的，
+     * 谁也不会把对方的版本号当成自己的新版（真机复现过：手机弹出了 TV 的更新说明）。
+     */
     private const val OWNER = "LuMuddy"
-    private const val REPO = "ModaTv"
+    private const val REPO = "ModaTvMobile"
 
     /**
      * 手机端专属的版本票据：版本名 + versionCode + 更新日志。
      *
-     * 文件名带 `-mobile` 后缀是**契约的一部分**，不是命名偏好：同一版 Release 上同时挂着
-     * TV 端的 `version.json`，两者只差一个后缀，拼错一个字母就退回到「手机读 TV 版本号」
-     * 那次的故障，而且现场看起来一切正常（版本号有值、弹窗能弹），极难复现定位。
+     * 文件名带 `-mobile` 后缀是**契约的一部分**，不是命名偏好：它由发版流水线
+     * （.github/workflows/android-release.yml）生成并挂到 Release 上，客户端按这个字面量读；
+     * 已经装出去的老版本也按这个名字读，改了就是一条 404。
      *
      * `/releases/latest/download/` 恒指向最新一版，不用先解析 feed 再拼版本号，
      * 少一处拼接就少一处错。
