@@ -498,6 +498,18 @@ fun PlayerBottomBar(
     onToggleDanmaku: () -> Unit,
     /** 非空 = 这台播放器是被"全屏"放大的，给一颗回到原页面的出口；根播放页不传 */
     onExitFullscreen: (() -> Unit)? = null,
+    /**
+     * 右下角簇**最后那颗收纳入口**点开哪个面板。
+     *
+     * 默认是「更多」；页内全屏（详情页放大那一支）里弹幕/内核/解码/片头片尾都拿不到数据，
+     * 收纳面板里只剩「比例」一项可用——那时再套一层「更多」就是让用户多点一次，
+     * 调用方直接把这一颗换成 [PlayerPanel.Aspect]。
+     */
+    morePanel: PlayerPanel = PlayerPanel.More,
+    /** 收纳入口的图标：换成 [PlayerPanel.Aspect] 时配套换成比例图标，形态仍是同一颗圆钮 */
+    moreIcon: ImageVector = Icons.Filled.MoreHoriz,
+    /** 收纳入口的无障碍描述；默认「更多」 */
+    moreDescription: String? = null,
     modifier: Modifier = Modifier,
 ) {
     val totalSec = if (durationMs > 0L) durationMs / 1000f else 1f
@@ -618,10 +630,10 @@ fun PlayerBottomBar(
                     onOpenPanel(PlayerPanel.Episode)
                 }
                 BottomCircleButton(
-                    icon = Icons.Filled.MoreHoriz,
-                    description = stringResource(R.string.m_player_more),
+                    icon = moreIcon,
+                    description = moreDescription ?: stringResource(R.string.m_player_more),
                 ) {
-                    onOpenPanel(PlayerPanel.More)
+                    onOpenPanel(morePanel)
                 }
                 // 退出全屏是这一行里的第五个动作，形态与上面四颗完全一致：
                 // 不许在底栏之外另浮一颗孤悬图标，也不许留两套按钮形态

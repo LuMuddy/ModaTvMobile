@@ -879,6 +879,11 @@ private fun DetailRoute(vm: MainViewModel, dest: Dest.Detail) {
         previewError = vm.detailPreviewError,
         onLoadPreview = vm::loadDetailPreview,
         onClearPreview = vm::clearDetailPreview,
+        // 全屏「清晰度」面板的数据：档位表与当前档都来自 episodeInfo，
+        // 与正在播的地址同一来源；切档只换地址，播放器按新 url 换源
+        previewTiers = vm.detailPreviewTiers,
+        previewTier = vm.detailPreviewTier,
+        onSelectPreviewTier = vm::selectDetailPreviewTier,
         // 小屏弹幕：窗口只服务详情页那一格（与播放页的 danmakuWindow 分开，
         // 两者 vid 不同，混用会互相清空）。位置由播放器自己的轮询回调。
         danmaku = vm.previewDanmakuWindow,

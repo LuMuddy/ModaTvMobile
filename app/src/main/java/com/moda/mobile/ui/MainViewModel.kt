@@ -467,6 +467,18 @@ class MainViewModel(private val app: Context) : ViewModel() {
     /** 只落这里，不影响选集与收藏：预览装不出来时详情页其余部分照常可用 */
     var detailPreviewError by mutableStateOf<AppError?>(null)
         private set
+    /**
+     * 小屏那一格可选的清晰度：**episodeInfo 返回的那一套**档位表，不是 series.tiers。
+     *
+     * 两者不是同一份（剧集级档位表与实际能播的档位可能不一致），而小屏真正在播的地址
+     * 是由 episodeInfo → pickBestTier 选出来的——面板要摆的就是这一套，否则高亮的档
+     * 和正在播的档对不上。
+     */
+    var detailPreviewTiers by mutableStateOf<List<Tier>>(emptyList())
+        private set
+    /** 小屏当前在用的档位；切档 = 换地址，见 [selectDetailPreviewTier] */
+    var detailPreviewTier by mutableStateOf<Tier?>(null)
+        private set
     private var detailPreviewJob: Job? = null
 
     /**
@@ -1428,6 +1440,10 @@ class MainViewModel(private val app: Context) : ViewModel() {
                     detailPreviewError = AppError.NoVideo
                     return@launch
                 }
+                // 档位表与小屏当前档一起落状态：全屏「清晰度」面板摆的就是这一套，
+                // 高亮的那一档必须与正在播的地址同一来源
+                detailPreviewTiers = info.tiers
+                detailPreviewTier = tier
                 val link = Repo.playLink(tier)
                 // 直链优先、HLS 兜底：没有 MP4 时把 HLS 当地址播，播放器自己按后缀判流类型
                 val primary = link.url.ifBlank { link.hlsUrl }
@@ -1452,6 +1468,46 @@ class MainViewModel(private val app: Context) : ViewModel() {
         }
     }
 
+    /**
+     * 详情页小屏切清晰度。
+     *
+     * 切档 = 换地址 = 换一条流：播放器按 url 认身份，地址变了自然换成新引擎
+     * （旧实例在会话的 800ms 宽限期后释放）。这里只做「拿新地址 + 换状态」，不碰引擎。
+     *
+     * 同档重复点直接返回：拿不到档位表时面板会退成"无可选"，但按钮仍在，
+     * 反复点不该每次都重新拉一次 playLink。
+     */
+    fun selectDetailPreviewTier(tier: Tier) {
+        val current = detailPreviewTier
+        if (current != null && current.fno == tier.fno && current.fn == tier.fn) return
+        detailPreviewTier = tier
+        // 不可用的档（VIP/无版权）只记高亮，不去拿地址：拿回来也是空的
+        if (!tier.available) return
+        val base = detailPreview ?: return
+        detailPreviewJob?.cancel()
+        detailPreviewLoading = true
+        detailPreviewError = null
+        val token = ++detailPreviewToken
+        detailPreviewJob = viewModelScope.launch {
+            try {
+                val link = Repo.playLink(tier)
+                val primary = link.url.ifBlank { link.hlsUrl }
+                if (primary.isBlank()) {
+                    detailPreviewError = AppError.EmptyPlayUrl
+                    return@launch
+                }
+                detailPreview = base.copy(url = primary, hlsUrl = link.hlsUrl.ifBlank { null })
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w("MainViewModel", "详情页切清晰度失败：${e.message}")
+                if (detailPreviewToken == token) detailPreviewError = e.toAppError()
+            } finally {
+                if (detailPreviewToken == token) detailPreviewLoading = false
+            }
+        }
+    }
+
     /** 离开详情页：清掉预览状态。播放器实例由 DetailPreviewPlayer 自己的 onDispose release */
     fun clearDetailPreview() {
         detailPreviewToken++
@@ -1460,6 +1516,8 @@ class MainViewModel(private val app: Context) : ViewModel() {
         detailPreview = null
         detailPreviewLoading = false
         detailPreviewError = null
+        detailPreviewTiers = emptyList()
+        detailPreviewTier = null
         // 弹幕跟着一起清：下次进别的剧不许先闪一帧上一部的弹幕
         resetPreviewDanmaku()
     }

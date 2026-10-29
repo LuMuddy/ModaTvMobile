@@ -178,6 +178,12 @@ fun DetailScreen(
     previewError: AppError? = null,
     /** 进页面装一次，参数是续播集下标（没有历史时是 0） */
     onLoadPreview: (Int) -> Unit = {},
+    /** 小屏那一格可选的清晰度（VM 的 detailPreviewTiers）：空 = 这一集拿不到档位表 */
+    previewTiers: List<Tier> = emptyList(),
+    /** 小屏当前在用的档位（VM 的 detailPreviewTier） */
+    previewTier: Tier? = null,
+    /** 切档：只换地址，播放器按新 url 换源；面板与底栏都由播放器自己画 */
+    onSelectPreviewTier: (Tier) -> Unit = {},
     /** 离开页面清掉；引擎与投屏由 [DetailPreviewPlayer] 自己的 onDispose 收尾 */
     onClearPreview: () -> Unit = {},
     /** 小屏的弹幕窗口（VM 的 previewDanmakuWindow）：只喂给顶部那一格播放器 */
@@ -615,6 +621,11 @@ fun DetailScreen(
             },
             // 弹幕：窗口按「小屏真的在放的那一集」装（vid 见上面的 previewVid），
             // 位置由播放器自己的轮询驱动
+            // 全屏「清晰度」面板：档位表/当前档/切档出口都从这里进播放器，
+            // 与根播放页那套面板共用同一个 QualitySheet，不另写一份
+            tiers = previewTiers,
+            selectedTier = previewTier,
+            onTierSelect = onSelectPreviewTier,
             danmaku = danmaku,
             previewVid = if (detail == null) "" else previewVid,
             onEnsureDanmaku = onEnsureDanmaku,

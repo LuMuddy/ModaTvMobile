@@ -3,6 +3,7 @@ package com.moda.mobile.ui.detail
 import android.content.Context
 import android.content.pm.ActivityInfo
 import android.media.AudioManager
+import android.os.SystemClock
 import android.util.Log
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
@@ -29,6 +30,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AspectRatio
 import androidx.compose.material.icons.filled.BrightnessMedium
 import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.Check
@@ -92,6 +94,7 @@ import com.moda.mobile.model.AppError
 import com.moda.mobile.model.Danmaku
 import com.moda.mobile.model.Episode
 import com.moda.mobile.model.PlayerError
+import com.moda.mobile.model.Tier
 import com.moda.mobile.ui.DetailPreview
 import com.moda.mobile.ui.components.RemoteImage
 import com.moda.mobile.ui.components.appErrorText
@@ -116,6 +119,7 @@ import com.moda.mobile.ui.player.SpeedSheet
 import com.moda.mobile.ui.player.findActivity
 import com.moda.mobile.ui.player.formatClock
 import com.moda.mobile.ui.player.panelLabel
+import com.moda.mobile.ui.player.tierNameText
 import com.moda.mobile.ui.speedLabelOf
 import com.moda.mobile.ui.theme.ModaColors
 import com.moda.mobile.ui.theme.ModaType
@@ -124,6 +128,7 @@ import kotlin.math.roundToInt
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -157,6 +162,12 @@ private const val LevelAutoHideMs = 800L
 
 /** 控件层无操作自动收起：与全屏播放页同一个 3 秒，用户不必学两套时序 */
 private const val ControlsAutoHideMs = 3000L
+
+/** 双击窗口：两次抬手落在这个窗口内就算双击（与系统的 300ms 同一量级） */
+private const val DoubleTapMs = 300L
+
+/** 双击后中央那个大图标停留多久：够看清"刚才是暂停还是继续"，又不至于挡画面 */
+private const val CenterPulseMs = 700L
 
 
 /** 纵滑调的是亮度还是音量（判定用手势起点 x，见手势层注释） */
@@ -223,6 +234,15 @@ fun DetailPreviewPlayer(
     /** 全屏「选集」面板的数据源；点一集仍然走页面既有的出口（去播放页看这一集） */
     episodes: List<Episode> = emptyList(),
     onSelectEpisode: (Episode) -> Unit = {},
+    /**
+     * 全屏「清晰度」面板的档位表：与正在播的地址同一来源（VM 的 detailPreviewTiers）。
+     * 空 = 这一集拿不到档位表，面板如实显示"无可选"，不摆一排按不动的按钮。
+     */
+    tiers: List<Tier> = emptyList(),
+    /** 当前在用的档位；面板高亮它、底栏那颗圆钮写它的名字 */
+    selectedTier: Tier? = null,
+    /** 切档：只换地址（VM 拿新 playLink），播放器按新 url 换源，布局不动 */
+    onTierSelect: (Tier) -> Unit = {},
     onSpeedChange: (Float) -> Unit = {},
     /** 小屏的弹幕窗口（VM 的 previewDanmakuWindow）：与全屏播放页那一份刻意分开，见 VM 里的说明 */
     danmaku: List<Danmaku> = emptyList(),
@@ -353,6 +373,14 @@ fun DetailPreviewPlayer(
     // 画面比例：这颗播放器自己的显示参数，不落盘（本页没有 settings），退出页面即回到 Fit
     var aspectMode by remember { mutableStateOf(AspectMode.Fit) }
 
+    // —— 单击 / 双击的区分（详见手势层）——
+    // 记"上一次抬手的时刻"与那个待决的单击任务：双击窗口内再点一下就取消掉它
+    var lastTapAt by remember { mutableLongStateOf(0L) }
+    var tapJob by remember { mutableStateOf<Job?>(null) }
+    /** 双击后中央亮一下的图标；null = 不显示 */
+    var pulseIcon by remember { mutableStateOf<ImageVector?>(null) }
+    var centerPulse by remember { mutableIntStateOf(0) }
+
     // —— 纵滑（亮度/音量）——
     var brightness by remember { mutableFloatStateOf(0.5f) }
     var volume by remember { mutableFloatStateOf(0.5f) }
@@ -367,6 +395,8 @@ fun DetailPreviewPlayer(
     // 手势回调活在 pointerInput 的协程里，读局部委托状态拿到的是最新值；
     // 但跨重组的"最新参数"仍要经 rememberUpdatedState，否则回调会用到旧回调/旧地址
     val brightnessNow by rememberUpdatedState(brightness)
+    // 双击要在手势协程里判断"现在是播还是停"：直接读 playing 会停在组合时那一帧
+    val playingNow by rememberUpdatedState(playing)
     val volumeNow by rememberUpdatedState(volume)
     val preferHlsNow by rememberUpdatedState(preferHls)
     val hlsNow by rememberUpdatedState(hlsUrl)
@@ -549,6 +579,13 @@ fun DetailPreviewPlayer(
         levelKind = null
     }
 
+    // 双击后的中央图标：连按两次只重新计时，不会叠出两个图标
+    LaunchedEffect(centerPulse) {
+        if (centerPulse == 0) return@LaunchedEffect
+        delay(CenterPulseMs)
+        pulseIcon = null
+    }
+
     // 控制层 3 秒无操作自动收起。面板开着时不收：那会儿用户在看面板，
     // 收起只会让关掉面板后这一格变成"什么都没有"。
     LaunchedEffect(controlsVisible, controlsTick, castSheetVisible, speedSheetVisible, panel) {
@@ -596,6 +633,24 @@ fun DetailPreviewPlayer(
             controller?.show(WindowInsetsCompat.Type.systemBars())
             activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         }
+    }
+
+    // 页内全屏期间系统栏必须**一直是藏的**：切后台回来、或用户从边缘临时唤出系统栏后
+    // 焦点回到本页，系统会把栏放回来——不补这一下，用户看到的就是"全屏里还有状态栏"。
+    // 与 PlayerScreen 的那条 ON_RESUME 同一条口径（两处不一致就会出现"一边藏一边露"）。
+    val fullscreenNow by rememberUpdatedState(fullscreen)
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME && fullscreenNow) {
+                val window = activity?.window
+                if (window != null) {
+                    WindowInsetsControllerCompat(window, window.decorView)
+                        .hide(WindowInsetsCompat.Type.systemBars())
+                }
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     // 进出全屏的状态落点：进全屏先亮一次控制层（第一眼只有画面的话，看不出这是能点的播放器），
@@ -802,7 +857,8 @@ fun DetailPreviewPlayer(
         //    谁先拿到同一次按下取决于注册顺序，正是 AGENTS.md 里禁止的「两套手势抢同一片区域」。
         //    排在四角按钮之前：Compose 的命中测试是"后画的先拿到"，所以返回/投屏/倍速/全屏
         //    永远优先吃掉触摸；awaitFirstDown 只接未被消费的按下，按在按钮上不会顺带暂停画面。
-        //    单击 = 播放/暂停（小屏不做"单击显隐控制层"：角落按钮是常驻的）。
+        //    单击 = 显隐控制层（小屏与页内全屏**同一段手势**：小屏的播放/暂停在底行那颗按钮上，
+        //    不再兼做单击，见 AGENTS.md「触摸纪律」）。
         //    只做纵滑，不做双击快进、不做横滑 seek——小屏和详情页的纵向滚动共用一块屏幕，
         //    再叠一条横向手势就会和"选下一集要往下滑"互相抢。
         if (interactive) {
@@ -862,13 +918,32 @@ fun DetailPreviewPlayer(
                                     }
                                 }
                             }
-                            // 抬手时还没越过斜率 = 单击：展开时再点立即收起，收起时显示并重新计时。
+                            // 抬手时还没越过斜率 = 一次"点"：再按双击窗口分两种。
                             // **纵滑优先**：一旦越过 slop 就是拖动，既不切显隐也不算单击。
                             // 手势被系统打断（来电/划走）不算单击，只有真的"抬起"才动作。
                             if (dragging) {
                                 levelTick++
                             } else if (lifted) {
-                                if (controlsVisible) controlsVisible = false else touchControls()
+                                val now = SystemClock.uptimeMillis()
+                                if (now - lastTapAt <= DoubleTapMs) {
+                                    // 双击 = 播放/暂停，并在画面中央亮一下对应的大图标：
+                                    // 播放中双击 → 暂停（中间出现暂停图标），再双击 → 继续播放
+                                    lastTapAt = 0L
+                                    tapJob?.cancel()
+                                    val nowPlaying = !playingNow
+                                    if (nowPlaying) engine?.play() else engine?.pause()
+                                    pulseIcon = if (nowPlaying) Icons.Filled.PlayArrow else Icons.Filled.Pause
+                                    centerPulse++
+                                } else {
+                                    // 单击 = 控制层显隐**取反**。但得先等一个双击窗口：
+                                    // 不等的话每次双击都会先闪一下控制层
+                                    lastTapAt = now
+                                    tapJob?.cancel()
+                                    tapJob = scope.launch {
+                                        delay(DoubleTapMs)
+                                        if (controlsVisible) controlsVisible = false else touchControls()
+                                    }
+                                }
                             }
                         }
                     },
@@ -1046,7 +1121,10 @@ fun DetailPreviewPlayer(
         //     PlayerSheet 系列），不在这里另写一套大屏控件。
         //     引擎与 Surface 一律不动：这一整段只画控件，不 acquire / 不 start / 不 release。
         if (fullscreen) {
-            if (!locked) {
+            // **必须跟着 controlsVisible 显隐**：少了这一层判断，3 秒自动收起与"单击画面"
+            // 只是改了状态、没人看——真机上的表现就是"点画面没反应、控制层也永远不收"。
+            // （根播放页那条同位置有 controlsVisible 判断，这里当初只写了 fullscreen。）
+            if (!locked && controlsVisible) {
                 PlayerTopBar(
                     title = title,
                     episodeLabel = episodeLabel,
@@ -1072,6 +1150,8 @@ fun DetailPreviewPlayer(
                     speedLabel = if (speed != 1f) speedLabelOf(speed) else null,
                     // 右下角圆钮写当前值（1.0x 也写）
                     speedText = speedLabelOf(speed),
+                    // 码率圆钮写当前档位名：与根播放页同一口径（拿不到就退回「清晰度」）
+                    qualityText = selectedTier?.let { tierNameText(it.display) },
                     onTogglePlay = {
                         togglePlay()
                         touchControls()
@@ -1102,6 +1182,12 @@ fun DetailPreviewPlayer(
                         toggleDanmaku()
                         touchControls()
                     },
+                    // 这一页能生效的收纳面板只剩「比例」（弹幕/内核/解码/片头片尾的数据与
+                    // 生效路径都在播放页），所以底栏那颗不叫「更多」，直接就是「比例」：
+                    // 多点一次「更多」才看见唯一一项，等于给用户加了一道路障
+                    morePanel = PlayerPanel.Aspect,
+                    moreIcon = Icons.Filled.AspectRatio,
+                    moreDescription = stringResource(R.string.player_aspect),
                     // 「退出全屏」：这一页的全屏是**页内状态**，退的是布局而不是页面，
                     // 所以右下角簇末尾也要有一颗写明动作的入口。它与顶栏那颗返回、
                     // 系统返回键是同一个落点（onExitFullscreen），三处不会各退一层
@@ -1109,22 +1195,28 @@ fun DetailPreviewPlayer(
                     modifier = Modifier.align(Alignment.BottomCenter).zIndex(2f),
                 )
             } else {
-                // 锁定态：整屏只留这一个出口，绝不弹整个控制层
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                // 锁定态：整屏只留这一个出口，绝不弹整个控制层。
+                // 位置/尺寸按用户指定：**左边中间**、距左 20dp、图标与顶栏那颗锁一样大（24dp），
+                // 不带圆底——锁屏时画面上不该再多一块色斑。触控区仍是 44dp（图标缩小不影响命中）。
+                Box(
+                    Modifier.fillMaxSize().padding(start = 20.dp),
+                    contentAlignment = Alignment.CenterStart,
+                ) {
                     Box(
                         Modifier
+                            .size(44.dp)
                             .clip(CircleShape)
-                            .background(Color(0xB3000000))
                             .clickable {
                                 locked = false
                                 touchControls()
-                            }
-                            .padding(20.dp),
+                            },
+                        contentAlignment = Alignment.Center,
                     ) {
                         Icon(
                             imageVector = Icons.Filled.LockOpen,
                             contentDescription = null,
                             tint = Color.White,
+                            modifier = Modifier.size(24.dp),
                         )
                     }
                 }
@@ -1145,11 +1237,15 @@ fun DetailPreviewPlayer(
                 )
 
                 PlayerPanel.Quality -> QualitySheet(
-                    // 本页拿不到档位表（DetailPreview 只带一条地址），也不许在这里切档：
-                    // 换档 = 换地址 = 重建引擎，本轮禁止。面板于是如实显示"无可选清晰度"
-                    tiers = emptyList(),
-                    selected = null,
-                    onPick = {},
+                    // 档位表来自 episodeInfo（VM 的 detailPreviewTiers），与正在播的地址同一来源；
+                    // 切档 = 换地址 = 换一条流，旧引擎在会话宽限期后释放，画面不黑
+                    tiers = tiers,
+                    selected = selectedTier,
+                    onPick = { tier ->
+                        panel = null
+                        onTierSelect(tier)
+                        touchControls()
+                    },
                     onClose = { panel = null },
                 )
 
@@ -1200,6 +1296,27 @@ fun DetailPreviewPlayer(
                 color = Color.White.copy(alpha = 0.9f),
                 strokeWidth = 2.dp,
             )
+        }
+
+        // 6b) 双击的中央图标：播放中双击 → 暂停（暂停图标），再双击 → 继续（播放图标）。
+        //     纯视觉、不带 clickable，不参与命中，控制层与手势层照旧各管各的
+        pulseIcon?.let { icon ->
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Box(
+                    Modifier
+                        .size(72.dp)
+                        .clip(CircleShape)
+                        .background(Color(0x66000000)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(40.dp),
+                    )
+                }
+            }
         }
 
         // 7) 纵滑指示：图标 + 百分比，松手 800ms 后收掉
