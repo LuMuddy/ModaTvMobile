@@ -42,6 +42,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -118,6 +119,7 @@ import com.moda.mobile.ui.player.DecoderSheet
 import com.moda.mobile.ui.player.EpisodeSheet
 import com.moda.mobile.ui.player.MarksSheet
 import com.moda.mobile.ui.player.MoreSheet
+import com.moda.mobile.ui.player.tierNameText
 import com.moda.mobile.ui.player.PlaybackSession
 import com.moda.mobile.ui.player.PlayerEngine
 import com.moda.mobile.ui.player.PlayerEngines
@@ -543,8 +545,11 @@ fun PlayerScreen(
     var ended by remember { mutableStateOf(false) }
 
     // —— 控制层 / 面板 / 锁定 ——
-    // 进播放页默认不显示控制层：用户是来看剧的，不是来看菜单的
-    var controlsVisible by remember { mutableStateOf(false) }
+    // 进播放页默认**显示**控制层：一进来屏幕上就是"这是哪一集、播到哪儿、能点什么"，
+    // 而不是一块只有画面的黑屏（用户不知道"这里能点"）。它沿用同一条 3 秒自动收起：
+    // 初值 true 也会命中下面那条 LaunchedEffect(controlsVisible, ...)，无操作就自己收掉，
+    // 所以"先看见、再消失"是默认体验；点画面仍是显隐切换（语义没有改）。
+    var controlsVisible by remember { mutableStateOf(true) }
     // 每次交互 +1，自动隐藏的计时以它为准（可取消计时：key 变了旧协程就被取消）
     var controlsTick by remember { mutableIntStateOf(0) }
     var locked by remember { mutableStateOf(false) }
@@ -881,7 +886,12 @@ fun PlayerScreen(
         // 从屏幕边缘上划可以临时唤出系统栏，但不会退出沉浸式
         controller?.systemBarsBehavior =
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        controller?.hide(WindowInsetsCompat.Type.systemBars())
+        // **只藏导航条**：状态栏（时间/电量/信号）要一直看得见——藏掉它，用户就不知道现在几点，
+        // 也看不懂为什么画面顶着屏幕边。show(statusBars) 与 hide 成对写在这里：
+        // 上一个页面可能把它藏过（沉浸式），进播放页必须显式要回来，不能靠"没藏过"。
+        // 画面/弹幕/控制层靠根 Box 的 statusBarsPadding() 从状态栏下沿开始，不会压住时间与电量。
+        controller?.show(WindowInsetsCompat.Type.statusBars())
+        controller?.hide(WindowInsetsCompat.Type.navigationBars())
         onDispose {
             controller?.show(WindowInsetsCompat.Type.systemBars())
             activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
@@ -930,11 +940,15 @@ fun PlayerScreen(
                     engine.pause()
                 }
                 Lifecycle.Event.ON_RESUME -> {
-                    // 回到前台系统栏可能已经回来了，重新进沉浸式
+                    // 回到前台系统栏可能已经回来了，重新进沉浸式——但**只收导航条**：
+                    // 状态栏要显式 show 回来（切后台期间可能被别的页面/系统改过）
                     val window = activity?.window
                     if (window != null) {
                         WindowInsetsControllerCompat(window, window.decorView)
-                            .hide(WindowInsetsCompat.Type.systemBars())
+                            .apply {
+                                show(WindowInsetsCompat.Type.statusBars())
+                                hide(WindowInsetsCompat.Type.navigationBars())
+                            }
                     }
                 }
                 else -> Unit
@@ -1179,7 +1193,10 @@ fun PlayerScreen(
         AspectMode.Ratio16x9, AspectMode.Ratio4x3 -> AspectRatioFrameLayout.RESIZE_MODE_FILL
     }
 
-    Box(Modifier.fillMaxSize().background(Color.Black)) {
+    // 状态栏让位：**根 Box 一处**，画面/弹幕层/手势层/控制层都是它的子节点，共用同一个下移。
+    // 只给画面加会让控件与画面错位（控件浮在状态栏里，画面在下面）；
+    // 加在别处则会出现"两层各让一次"的双倍空白。背景仍是纯黑，让出来的那条就是黑底。
+    Box(Modifier.fillMaxSize().background(Color.Black).statusBarsPadding()) {
         // 1) 画面
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             // AndroidView 的 factory 只在节点首次进入组合时跑一次，换内核就换了 View 类型，
@@ -1429,6 +1446,10 @@ fun PlayerScreen(
                 positionMs = positionMs,
                 durationMs = durationMs,
                 speedLabel = if (settings.speed != 1f) settings.speedLabel else null,
+                // 右下角那颗圆钮写当前值（1.0x 也写）：那一行只写值不写"倍速"
+                speedText = settings.speedLabel,
+                // 码率圆钮：当前档位名（拿不到就是 null → 组件自己退回「清晰度」）
+                qualityText = selectedTier?.let { tierNameText(it.display) },
                 onTogglePlay = { togglePlay() },
                 // 下一集：只把点击交回既有通路（onSelectEpisode），末集 nextEpisode 为 null → 置灰
                 onNextEpisode = { nextEpisode?.let { episode -> onSelectEpisode(episode) } },
@@ -1543,7 +1564,12 @@ fun PlayerScreen(
 
             PlayerPanel.Speed -> SpeedSheet(
                 speed = settings.speed,
-                onPick = { value -> updateSettings(settings.copy(speed = value)) },
+                onPick = { value ->
+                    updateSettings(settings.copy(speed = value))
+                    // 选完就收：SpeedSheet 不自关（三处调用点各有各的关闭方式），关在这里。
+                    // 只有倍速收——清晰度/选集/其它面板选完要留着，用户往往还要连着调别的
+                    panel = null
+                },
                 onClose = { panel = null },
             )
 

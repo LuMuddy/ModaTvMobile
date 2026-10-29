@@ -122,6 +122,14 @@ data class PlayerSettings(
      * 合法档位与 [PlayerSpeedOptions] 同一份，读回时用 minByOrNull 夹到最近档。
      */
     val defaultSpeed: Float = 1.0f,
+    /**
+     * 流量播放提醒：蜂窝网络下先让用户在播放区确认一次再起播。
+     *
+     * 它同时是设置 → 播放设置里那颗 Switch 与详情页确认卡里「不再提醒」的**同一个键**：
+     * 两条入口各存一份的话，改一处另一处不会变，用户会以为开关坏了。
+     * 默认开：一次误起播就是几百 MB 流量，而多点一下的成本只是一次点击。
+     */
+    val cellularPrompt: Boolean = true,
 ) {
     /** 弹幕可绘制区域从屏幕顶部让出的比例 */
     val topRatio: Float
@@ -165,7 +173,8 @@ private val Context.playerSettingsDataStore: DataStore<Preferences> by
  * 键与默认值：
  * playback_speed = 1.0 / danmaku_enabled = true / danmaku_font_size_sp = 22
  * danmaku_region = FullScreen / danmaku_top_percent = 0 / danmaku_bottom_percent = 0
- * aspect_mode = Fit
+ * aspect_mode = Fit / player_core = Exo / decoder_mode = Hardware / default_speed = 1.0
+ * cellular_prompt = true
  */
 private object Keys {
     val SPEED = floatPreferencesKey("playback_speed")
@@ -181,6 +190,9 @@ private object Keys {
     val PLAYER_CORE = stringPreferencesKey("player_core")
     val DECODER_MODE = stringPreferencesKey("decoder_mode")
     val DEFAULT_SPEED = floatPreferencesKey("default_speed")
+
+    /** 流量播放提醒（设置页那颗 Switch 与详情页「不再提醒」共用这一个键） */
+    val CELLULAR_PROMPT = booleanPreferencesKey("cellular_prompt")
 }
 
 object PlayerSettingsStoreImpl {
@@ -217,6 +229,7 @@ private class DataStorePlayerSettingsStore(
             prefs[Keys.PLAYER_CORE] = settings.playerCore.name
             prefs[Keys.DECODER_MODE] = settings.decoderMode.name
             prefs[Keys.DEFAULT_SPEED] = settings.defaultSpeed
+            prefs[Keys.CELLULAR_PROMPT] = settings.cellularPrompt
         }
     }
 }
@@ -246,5 +259,7 @@ private fun Preferences.toSettings(): PlayerSettings {
         defaultSpeed = PlayerSpeedOptions
             .minByOrNull { kotlin.math.abs(it.value - (this[Keys.DEFAULT_SPEED] ?: 1.0f)) }
             ?.value ?: 1.0f,
+        // 读不到 = 用户从没关过提醒 ⇒ 默认开
+        cellularPrompt = this[Keys.CELLULAR_PROMPT] ?: true,
     )
 }

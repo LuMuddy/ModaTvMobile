@@ -1,5 +1,6 @@
 package com.moda.mobile.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -16,7 +17,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
@@ -25,6 +30,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.outlined.FavoriteBorder
@@ -38,6 +44,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -51,7 +58,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import com.moda.mobile.R
+import com.moda.mobile.data.NetKind
 import com.moda.mobile.model.AppError
+import com.moda.mobile.model.Danmaku
 import com.moda.mobile.model.Episode
 import com.moda.mobile.model.SeriesDetail
 import com.moda.mobile.model.Tier
@@ -64,6 +73,7 @@ import com.moda.mobile.ui.detail.DetailPreviewPlayer
 import com.moda.mobile.ui.theme.ModaColors
 import com.moda.mobile.ui.theme.ModaType
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.launch
 
 /** 「看完」角标的前景色：深底上的柔绿，与 VIP 的金、预告的靛蓝互不混淆 */
 private val CompletedGreen = Color(0xFF7BD88F)
@@ -72,16 +82,45 @@ private val CompletedGreen = Color(0xFF7BD88F)
 private val FavoriteYellow = Color(0xFFFFC53D)
 
 /**
- * 简介折叠时的行数。手机上页头已经很满，简介默认只占三行，
- * 想看全的点「展开」——比默认铺开五六行把选集顶到屏幕外要好。
+ * 简介折叠时的行数。
+ *
+ * 5 行（原 3 行）：三行在 16sp 下只有两句话，简介那一块看着是最"空"的地方；
+ * 五行的代价只是把选集轨道往下推一点，而「展开/收起」仍然由实测溢出决定，
+ * 所以短简介不会多出一条点不动的按钮。
  */
-private const val DESC_COLLAPSED_LINES = 3
+private const val DESC_COLLAPSED_LINES = 5
 
 /** 选集轨道一屏露几个：3 个是用户对着截图定的，格子宽度全部由它反算，不写死 dp */
 private const val EPISODES_PER_SCREEN = 3
 
+/**
+ * 视频块与状态栏之间那一道留白。
+ *
+ * 用户要求：视频顶部与返回键顶部**对齐**。
+ *
+ * 返回那颗是 48dp 触控盒、24dp 图标居中，盒顶在 statusBarTop + 12dp，
+ * 所以图标顶边 = statusBarTop + 12 + 12 = **statusBarTop + 24dp** —— 这个常量就是 24。
+ * 只加在视频块上（占位 Spacer 与播放器节点两处同一个值，否则两者高度算不到一起，
+ * 会漏一条或盖住标题）；返回按钮本身的位置与尺寸不动。
+ */
+private val VideoTopGap = 24.dp
+
 /** VIP 角标的金：选集缩略图右上角那颗「VIP」用它 */
 private val VipGold = Color(0xFFE0A32E)
+
+/**
+ * 被「流量播放提醒」拦下的那个动作。确认卡点「继续播放」时原样执行它。
+ *
+ * 两条入口（封面上的播放键 / 选集里点某一集）都落到这里，所以"确认之后做什么"
+ * 只有一份实现；各写一次的话，早晚有一条入口确认完什么也不干。
+ */
+private sealed interface BlockedAction {
+    /** 给小屏装地址起播（入参是续播集的 0 起下标） */
+    data class StartPreview(val episodeIndex: Int) : BlockedAction
+
+    /** 去全屏播放页看这一集（index 是它在集数表里的下标，用来钉选集高亮） */
+    data class PlayEpisode(val episode: Episode, val index: Int) : BlockedAction
+}
 
 /**
  * 剧集详情：顶部小屏播放器 + 片名 + 收藏/可展开简介 + 单行横向选集轨道。
@@ -141,6 +180,21 @@ fun DetailScreen(
     onLoadPreview: (Int) -> Unit = {},
     /** 离开页面清掉；引擎与投屏由 [DetailPreviewPlayer] 自己的 onDispose 收尾 */
     onClearPreview: () -> Unit = {},
+    /** 小屏的弹幕窗口（VM 的 previewDanmakuWindow）：只喂给顶部那一格播放器 */
+    danmaku: List<Danmaku> = emptyList(),
+    /** 小屏换了播放位置就把弹幕窗口要过来（VM.ensurePreviewDanmaku，入参是 vid + 位置） */
+    onEnsureDanmaku: (String, Long) -> Unit = { _, _ -> },
+    /**
+     * 当前网络类型（VM 在进入详情页时探测一次）。
+     * 只有**明确是蜂窝**才谈流量提醒：WiFi / 以太网 / VPN / 无网都按"可直接起播"处理。
+     */
+    netKind: NetKind = NetKind.Other,
+    /** 探测一次网络类型并把**新鲜结论返回**：自动起播的判定要用返回值，不能等状态回流 */
+    onProbeNet: () -> NetKind = { NetKind.Other },
+    /** 「流量播放提醒」（PlayerSettings.cellularPrompt）：与设置 → 播放设置里那颗 Switch 同一个键 */
+    cellularPrompt: Boolean = true,
+    /** 写同一个键：详情页的「不再提醒」与设置页那颗开关互为镜像，各存一份就会各说各话 */
+    onSetCellularPrompt: (Boolean) -> Unit = {},
 ) {
     val episodes = detail?.episodes.orEmpty()
 
@@ -184,15 +238,39 @@ fun DetailScreen(
      */
     val previewIndex = preview?.episodeIndex ?: resumeIndex.coerceAtLeast(0)
 
+    /**
+     * 小屏在播的那一集的 vid：弹幕接口只认 vid，而 [DetailPreview] 只有地址。
+     * 取的集必须与 [previewIndex] 同一口径（就是小屏真的在放的那一集），
+     * 高亮用的 [currentIndex] 不能用——用户点过选集之后它指向的是"要去全屏看的那一集"。
+     */
+    val previewVid = episodes.getOrNull(previewIndex)?.vid.orEmpty()
+
     val loadPreviewNow by rememberUpdatedState(onLoadPreview)
     val clearPreviewNow by rememberUpdatedState(onClearPreview)
 
     // 进页面装一次地址。必须等历史落定（[DetailResume.loaded]）再决定装哪一集：
     // 先装第 1 集、等历史到了再换第 5 集，小屏会先起播一句再从头缓冲一次。
     var previewRequested by remember(detail?.cid) { mutableStateOf(false) }
-    LaunchedEffect(detail?.cid, resume?.loaded, resumeIndex, episodes.size) {
+
+    // —— 流量提醒（蜂窝 + 提醒开启）——
+    // trafficHold：这一格停在「封面 + 播放键」等用户点，地址没装、一个字节都没发。
+    // consentVisible：确认卡展开。状态放在**这一层**而不是播放器里，因为选集轨道那条入口
+    //   也在页面里，两处必须弹同一张卡。
+    // pendingAction：被拦下的那个动作，确认后原样执行。
+    var trafficHold by remember(detail?.cid) { mutableStateOf(false) }
+    var consentVisible by remember(detail?.cid) { mutableStateOf(false) }
+    var pendingAction by remember(detail?.cid) { mutableStateOf<BlockedAction?>(null) }
+
+    LaunchedEffect(detail?.cid, resume?.loaded, resumeIndex, episodes.size, cellularPrompt) {
         if (previewRequested || episodes.isEmpty()) return@LaunchedEffect
         if (resume != null && !resume.loaded) return@LaunchedEffect
+        // 网络类型必须在这一步就用上**新鲜**结论（取返回值，不等状态回流）：
+        // 蜂窝下若按上一页留下的旧值判断，装地址这一下已经把流量花掉了
+        val kind = onProbeNet()
+        if (kind == NetKind.Cellular && cellularPrompt) {
+            trafficHold = true
+            return@LaunchedEffect
+        }
         previewRequested = true
         loadPreviewNow(resumeIndex.coerceAtLeast(0))
     }
@@ -227,20 +305,86 @@ fun DetailScreen(
     // 换布局不换节点，Surface 就不会被拆掉重贴（黑帧正是从"拆掉重贴"来的）。
     var fullscreen by remember(detail?.cid) { mutableStateOf(false) }
 
+
     // 页面纵向滚动位置放在这一层：全屏时内容整段不组合，状态留在这里才不会连同位置一起丢掉
     val pageState = rememberLazyListState()
+    val pageScope = rememberCoroutineScope()
 
-    Box(Modifier.fillMaxSize().background(ModaColors.Bg)) {
+    /**
+     * 被拦下的动作现在真的执行。**这是"确认后做什么"的唯一实现**：
+     * 封面上的播放键与选集里点某一集都从这里落地，各写一次早晚有一条忘了接。
+     */
+    fun executeBlocked(action: BlockedAction) {
+        when (action) {
+            is BlockedAction.StartPreview -> {
+                // 取消过的那次也把 trafficHold 打开：取消 = 回到封面 + 播放键，不是回到自动起播
+                trafficHold = true
+                previewRequested = true
+                loadPreviewNow(action.episodeIndex)
+            }
+
+            is BlockedAction.PlayEpisode -> {
+                // 高亮与"用户接管"都推迟到这一刻：点一下又取消不该把选集高亮挪过去
+                userTouched = true
+                currentIndex = action.index
+                onPlay(action.episode)
+            }
+        }
+    }
+
+    /**
+     * 拦一次动作：需要提醒就先展开确认卡并记下它，否则直接执行。
+     *
+     * 判据用"进页面探测的那一次结论"（[netKind]），本页不常驻 NetworkCallback；
+     * 两个条件缺一不可——不是蜂窝就没什么好提醒的，提醒关掉之后也该和 WiFi 一样直连。
+     */
+    fun runOrAsk(action: BlockedAction) {
+        if (netKind == NetKind.Cellular && cellularPrompt) {
+            pendingAction = action
+            consentVisible = true
+            // 确认卡画在播放器那一格（就是"视频播放那块区域"）里：页面滚下去之后
+            // 点集号只会让人以为没反应，所以顺手把那一格拉回视野（只动滚动，不动路由）
+            pageScope.launch {
+                if (pageState.layoutInfo.totalItemsCount > 0) pageState.animateScrollToItem(0)
+            }
+            return
+        }
+        executeBlocked(action)
+    }
+
+    // 返回键分层：确认卡展开时先收起它，不直接退掉整个详情页。
+    // 与播放器里那条 BackHandler 同一套规则（新增的弹层都要插进返回链）
+    BackHandler(enabled = consentVisible) {
+        consentVisible = false
+        pendingAction = null
+    }
+
+    // 状态栏让位：**本页自己算**，不依赖 AppRoot 的 safeDrawingPadding（它对 Dest.Detail 已经不加了）。
+    // 为什么不用 statusBarsPadding()：那个修饰符会扣除"上游已消费"的 inset，一旦外层也加了一层，
+    // 这里就静默变成 0——实测就是这样把画面顶到了 y=0、弹幕飘进状态栏。
+    // asPaddingValues() 取的是系统原始 inset，不受消费影响，所以这个数在两种宿主下都算得出来，
+    // 而且内容列与播放器节点用的是**同一个值**，不会一高一低。
+    val statusBarTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val navBarBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+
+    // 全屏时底色换成纯黑：播放器让出状态栏后露的就是这个底——用页面底色会在纯黑画面顶上留一条灰边。
+    Box(Modifier.fillMaxSize().background(if (fullscreen) Color.Black else ModaColors.Bg)) {
         // 非全屏 = 占位 + 可滚动的内容；全屏时整段不组合，触摸也就不会在画面底下抢
         if (!fullscreen) {
-            Column(Modifier.fillMaxSize()) {
+            // 状态栏：**内容列与下面那颗播放器节点用同一个 [statusBarTop]**（两根子树各自排版，
+            // 只加一处就是播放器盖住内容、或中间漏一条）。底部留出导航条那一条，
+            // 因为外层对这一页已经不再做 safeDrawingPadding。
+            Column(Modifier.fillMaxSize().padding(top = statusBarTop, bottom = navBarBottom)) {
                 // 播放器占位：**与下面播放器那条 Modifier 链逐字对应**
                 // （fillMaxWidth → 左右 16dp → 16:9）。数值与顺序不许各自为政，
                 // 否则两边算出的高度差一截，就是"一条空洞"或者"播放器盖住标题"。
+                // 它是这一列的第一个子节点：视频块顶边 = 页面顶边（状态栏之下），
+                // 上面**不再有**返回条——返回回到画面左上角（见 DetailPreviewPlayer 的 onBack），
+                // 所以这里也没有任何要补的高度。
                 Spacer(
                     Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp)
+                        .padding(top = VideoTopGap)
                         .aspectRatio(16f / 9f),
                 )
                 if (detail == null) {
@@ -272,7 +416,9 @@ fun DetailScreen(
                             item(key = "title") {
                                 Text(
                                     text = detail.title,
-                                    style = ModaType.Heading,
+                                    // Heading(18sp) → Title(22sp)：满页留白里片名是唯一
+                                    // "该有分量"的一行，字号只在这一处改，别的页面不动
+                                    style = ModaType.Title,
                                     color = ModaColors.Text,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis,
@@ -390,10 +536,9 @@ fun DetailScreen(
                                                 isTrailer = isTrailer(ep),
                                                 modifier = Modifier.width(cellWidth),
                                                 onClick = {
-                                                    // 用户已经自己选了：钉住高亮，别让迟到的历史顶掉
-                                                    userTouched = true
-                                                    currentIndex = index
-                                                    onPlay(ep)
+                                                    // 进播放页这条路先过流量门：蜂窝 + 提醒开启时
+                                                    // 先弹确认卡，确认之后才钉高亮 + 进播放页
+                                                    runOrAsk(BlockedAction.PlayEpisode(ep, index))
                                                 },
                                             )
                                         }
@@ -430,13 +575,13 @@ fun DetailScreen(
                     }
                 }
             }
+
         }
 
         // ⚠ 全文**唯一**的播放器调用点：小屏与全屏共用这一个节点，只换 Modifier。
-        // 它在**所有**数据状态下都在组合里（loading / 失败 / 空态也在）：
-        // 非全屏时这颗卡片左上角的返回是这一页唯一的返回出口，漏掉任何一态都会让那一屏
-        // 只剩系统返回手势。
-        // 非全屏 = 16:9 卡片（高度与上面那个 Spacer 严丝合缝）；
+        // 它在**所有**数据状态下都在组合里（loading / 失败 / 空态也在）——那几屏也要有画面出口，
+        // 页面出口（返回）画在这个节点自己的左上角，见 DetailPreviewPlayer 的 onBack。
+        // 非全屏 = 16:9 卡片（高度与上面那个 Spacer 严丝合缝，顶边就是页面顶边，不让任何高度）；
         // 全屏 = 整块屏幕，压在内容之上（内容本来就不组合，zIndex 只是保险）。
         // 这里**不换路由**：换路由就要新建 Surface，用户看到的就是一帧黑再重贴。
         DetailPreviewPlayer(
@@ -451,7 +596,6 @@ fun DetailScreen(
             onRetry = {
                 if (detail == null) onRetry?.invoke() ?: onBack() else loadPreviewNow(previewIndex)
             },
-            onBack = onBack,
             // 全屏按钮 = 只改布局。以前这里 push 播放页路由（→ 新 Surface → 黑帧），
             // 现在留在本页换一颗 Modifier；播放页路由只留给选集里"去大屏看这一集"
             onEnterFullscreen = { fullscreen = true },
@@ -460,21 +604,89 @@ fun DetailScreen(
             // 全屏"选集"面板的数据源。点一集仍然走页面既有的出口（进播放页看这一集）
             episodes = episodes,
             onSelectEpisode = { episode ->
-                userTouched = true
-                onPlay(episode)
+                // 选集面板是第三条入口，与轨道上点集号走同一道闸
+                // （下标用 indexOf 反查：面板只回传 Episode，高亮要的是集数表下标）
+                runOrAsk(
+                    BlockedAction.PlayEpisode(
+                        episode = episode,
+                        index = episodes.indexOf(episode).takeIf { it >= 0 } ?: episode.index,
+                    ),
+                )
+            },
+            // 弹幕：窗口按「小屏真的在放的那一集」装（vid 见上面的 previewVid），
+            // 位置由播放器自己的轮询驱动
+            danmaku = danmaku,
+            previewVid = if (detail == null) "" else previewVid,
+            onEnsureDanmaku = onEnsureDanmaku,
+            // 弹幕开关要连「本剧覆盖」一起写（见 DetailPreviewPlayer.toggleDanmaku）：
+            // 播放页读的是 override 优先，"小屏关了、大屏还开着"就是这么来的
+            cid = detail?.cid.orEmpty(),
+            // 蜂窝 + 提醒开启且地址还没装：这一格当封面用。
+            // 三个附加条件缺一不可：已装地址/正在装/装失败时都必须让位给真实状态，
+            // 否则错误面板会被一张封面盖住，用户点不到重试
+            trafficHold = trafficHold && preview == null && !previewLoading && previewError == null,
+            cover = detail?.cover.orEmpty(),
+            onRequestStart = {
+                runOrAsk(BlockedAction.StartPreview(resumeIndex.coerceAtLeast(0)))
+            },
+            consentVisible = consentVisible,
+            onConsentAccept = { dontAskAgain ->
+                // 勾了「不再提醒」才落盘，写的是设置页那颗 Switch 的同一个键
+                if (dontAskAgain) onSetCellularPrompt(false)
+                consentVisible = false
+                pendingAction?.let { executeBlocked(it) }
+                pendingAction = null
+            },
+            onConsentCancel = {
+                // 取消 = 收起卡片、回到封面 + 播放键：不装地址、不消耗流量
+                consentVisible = false
+                pendingAction = null
             },
             modifier = Modifier
                 .align(Alignment.TopStart)
                 .zIndex(if (fullscreen) 2f else 1f)
                 .then(
                     if (fullscreen) {
-                        Modifier.fillMaxSize()
+                        // 全屏也让出状态栏（与内容列同一个 [statusBarTop]）：画面、弹幕、手势、
+                        // 控制层都是这颗节点的子节点，一处生效就全部对齐
+                        Modifier.fillMaxSize().padding(top = statusBarTop)
                     } else {
-                        // 与上面那个 Spacer 同一条链、同一个顺序：高度必须严丝合缝
-                        Modifier.fillMaxWidth().padding(horizontal = 16.dp)
+                        // 与上面那个 Spacer 同一条链、同一个顺序：高度必须严丝合缝。
+                        // top 用**同一个 [statusBarTop]**（不是 statusBarsPadding）：
+                        // 两处不一致就是播放器盖住内容、或画面顶进状态栏。
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(top = statusBarTop + VideoTopGap)
                     },
                 ),
         )
+
+        // 页面出口：**root Box 的最后一个子节点**——绘制顺序与命中顺序都在最上面，
+        // 不靠 zIndex 赌运气（上一版压在播放器节点之前，实测被画面盖住了）。
+        // 位置与 HistoryScreen 那条顶栏逐字一致：start 4dp、top 12dp（这里再加同一个 statusBarTop，
+        // 因为本页不再吃 AppRoot 的 safeDrawingPadding，两页的绝对坐标因此相同）、
+        // 48dp 触控、24dp 图标、同一个图标与 tint 与 contentDescription。
+        // 任何情况下都可见可点：控制层收起不影响它、弹幕层在它下面、流量确认卡（播放器内 3f）
+        // 也在它下面；全屏时整段不组合（全屏的出口是 PlayerTopBar 那颗 = 退出全屏）。
+        if (!fullscreen) {
+            Box(
+                Modifier
+                    .align(Alignment.TopStart)
+                    .zIndex(6f)
+                    .padding(start = 4.dp, top = statusBarTop + 12.dp)
+                    .size(48.dp)
+                    .clip(CircleShape)
+                    .clickable(onClick = onBack),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = stringResource(R.string.m_action_back),
+                    tint = ModaColors.Text,
+                    modifier = Modifier.size(24.dp),
+                )
+            }
+        }
     }
 }
 
@@ -540,7 +752,9 @@ private fun DescriptionBlock(detailCid: String, description: String) {
     Column(Modifier.fillMaxWidth()) {
         Text(
             text = description,
-            style = ModaType.Body,
+            // 15sp → 16sp，行高放宽到 1.5 倍（24sp）：简介是连续长文，行距不够时
+            // 整段会糊成一块灰砖——"太空"的另一半原因其实在这里，不只是字号
+            style = ModaType.Body.copy(fontSize = 16.sp, lineHeight = 24.sp),
             color = ModaColors.TextDim,
             maxLines = if (expanded) Int.MAX_VALUE else DESC_COLLAPSED_LINES,
             overflow = TextOverflow.Ellipsis,

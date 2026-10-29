@@ -23,4 +23,15 @@
     <string name="detail_completed_desc">已看完</string>
     <string name="detail_fav_add_desc">收藏</string>
     <string name="detail_fav_remove_desc">已收藏，点击取消收藏</string>
+
+    <!-- ==================== 流量播放提醒（手机端新增） ====================
+         确认卡画在详情页顶部那格 16:9 播放区里，所以文案与详情页同文件；
+         最后两条属于设置 → 播放设置里那颗开关（与卡里的「不再提醒」是同一个键，
+         文案放在一起，省得为两条键再开一个 values 文件）。 -->
+    <string name="m_detail_traffic_message">当前是移动网络，继续播放会消耗流量</string>
+    <string name="m_detail_traffic_play">继续播放</string>
+    <string name="m_detail_traffic_cancel">取消</string>
+    <string name="m_detail_traffic_dont_ask">不再提醒</string>
+    <string name="m_settings_playback_traffic_prompt">流量播放提醒</string>
+    <string name="m_settings_playback_traffic_prompt_hint">移动网络下先在播放区确认一次再起播；关掉后与 WiFi 一样直接播放。</string>
 </resources>

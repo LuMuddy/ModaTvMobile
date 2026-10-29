@@ -22,6 +22,10 @@
     <!-- 底栏「下一集」：只在有下一集时可点，末集置灰 -->
     <string name="m_player_next_episode">下一集</string>
 
+    <!-- 内嵌播放器进全屏后右下角簇的最后一颗。根播放页不组合这一颗：
+         那里本来就是整页播放，「退出全屏」没有目标可去 -->
+    <string name="m_player_exit_fullscreen">退出全屏</string>
+
     <!-- 画面右侧竖排的截图按钮与它的三条回执 -->
     <string name="m_player_screenshot">截图</string>
     <string name="m_player_shot_saved">截图已保存到相册</string>

@@ -7,6 +7,7 @@ import android.util.Log
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -21,7 +22,6 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -29,16 +29,19 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.BrightnessMedium
 import androidx.compose.material.icons.filled.Cast
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Speed
+import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.outlined.SubtitlesOff
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
@@ -67,6 +70,7 @@ import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import androidx.compose.ui.viewinterop.AndroidView
@@ -80,10 +84,16 @@ import androidx.media3.ui.AspectRatioFrameLayout
 import androidx.media3.ui.PlayerView
 import com.moda.mobile.R
 import com.moda.mobile.data.local.AspectMode
+import com.moda.mobile.data.local.PlaybackOverride
+import com.moda.mobile.data.local.PlaybackOverrideStoreImpl
+import com.moda.mobile.data.local.PlayerSettings
+import com.moda.mobile.data.local.PlayerSettingsStoreImpl
 import com.moda.mobile.model.AppError
+import com.moda.mobile.model.Danmaku
 import com.moda.mobile.model.Episode
 import com.moda.mobile.model.PlayerError
 import com.moda.mobile.ui.DetailPreview
+import com.moda.mobile.ui.components.RemoteImage
 import com.moda.mobile.ui.components.appErrorText
 import com.moda.mobile.ui.components.playerErrorText
 import com.moda.mobile.ui.player.AspectSheet
@@ -91,6 +101,8 @@ import com.moda.mobile.ui.player.CastController
 import com.moda.mobile.ui.player.CastDevice
 import com.moda.mobile.ui.player.CastSheet
 import com.moda.mobile.ui.player.CastStatusChip
+import com.moda.mobile.ui.player.ControlsBottomInset
+import com.moda.mobile.ui.player.DanmakuOverlay
 import com.moda.mobile.ui.player.EpisodeSheet
 import com.moda.mobile.ui.player.PlaybackSession
 import com.moda.mobile.ui.player.PlayerBottomBar
@@ -109,6 +121,7 @@ import com.moda.mobile.ui.theme.ModaColors
 import com.moda.mobile.ui.theme.ModaType
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -116,6 +129,15 @@ import kotlinx.coroutines.launch
 
 /** 四角图标的触控区：44dp 是触摸纪律的下限，再小就不是"按不到"而是"不敢按" */
 private val CornerTouchSize = 44.dp
+
+/**
+ * 小屏底行占用的高度，弹幕层按它让位。
+ *
+ * 不直接复用全屏页的 [ControlsBottomInset]（112dp）：那是"进度条行 + 右下角簇"两行的高度，
+ * 而这一格整体才 16:9（360dp 宽的屏上约 185dp 高），让出 112dp 就没地方飘弹幕了。
+ * 这里的数字来自底行本身：44dp 的播放/暂停按钮 + 上下 12/8 的内边距 = 64dp。
+ */
+private val PreviewControlsBottomInset = 64.dp
 
 /**
  * 手指移动超过这个距离才算纵滑，小于它仍然判单击（播放/暂停）。
@@ -143,9 +165,15 @@ private enum class LevelKind { Brightness, Volume }
 /**
  * 详情页顶部的小屏播放器：16:9、真的能播、上下各一条贴边渐变带。
  *
- * 控件默认收起，**只有返回常驻**：这一格只有 16:9，把返回也藏起来用户下一次就找不到了。
- * 其余入口（投屏/倍速、底部那一行）点一下画面才出现，3 秒无操作自动收起，面板开着时不收。
+ * 控件默认收起，**只有返回常驻**：剩下的「投屏 / 倍速 / 弹幕」与底行，点一下画面才出现，
+ * 3 秒无操作自动收起，面板开着时不收。返回不跟着收起——它是这一格唯一的出口，
+ * 藏起来用户下一次就找不到了；而且它的尺寸/边距与历史页、搜索页那颗逐字一致
+ * （48dp 触控、24dp 图标、start 4 / top 12、单图标无圆底），二级页的出口在各处必须是同一个东西。
  * 所以单击画面的语义是**显隐控制层**，不再兼做播放/暂停——播放/暂停是底行最左那颗按钮。
+ *
+ * 弹幕走全 App 那一份 [DanmakuOverlay]（不另写一套），窗口由 [danmaku] 喂进来、
+ * 由**这一格自己的播放位置**驱动（[onEnsureDanmaku]）：详情页不写历史、不判完成，
+ * 弹幕也不例外——它只是"顺手看一眼"时的伴生信息。
  *
  * 两条带子都是整宽、贴卡片边缘、**无圆角无左右 margin**：圆角只来自卡片自己的 clip(14dp)。
  * 背景是渐变而不是一块深色矩形——浮在画面里的深色块在片头黑底时会露出一条硬边，像贴纸。
@@ -172,6 +200,9 @@ private enum class LevelKind { Brightness, Volume }
  * 自始至终是同一个（logcat 里「新建并起播」整段只该出现一次）。谁把这里改成"换路由/换组件"，
  * 用户看到的就是一帧黑再重贴。
  */
+// Slider 的 thumb/track 重载在 material3 1.4 仍是 @ExperimentalMaterial3Api：
+// 只在这一处用（小屏进度条要播放器样式，见 PreviewSliderThumb / PreviewSliderTrack）
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun DetailPreviewPlayer(
     /** 只喂给投屏元数据（电视上显示片名）；覆盖层不画标题，片名由页面自己排 */
@@ -184,7 +215,6 @@ fun DetailPreviewPlayer(
     /** 小屏在播第几集（0 起下标）：只喂投屏元数据的「标题 · 第 N 集」，覆盖层不画标题 */
     episodeIndex: Int,
     onRetry: () -> Unit,
-    onBack: () -> Unit,
     onEnterFullscreen: () -> Unit,
     /** 退出全屏：**只改布局**（不换路由、不碰引擎）。顶栏返回、返回键、后退层都用它 */
     onExitFullscreen: () -> Unit = {},
@@ -194,6 +224,42 @@ fun DetailPreviewPlayer(
     episodes: List<Episode> = emptyList(),
     onSelectEpisode: (Episode) -> Unit = {},
     onSpeedChange: (Float) -> Unit = {},
+    /** 小屏的弹幕窗口（VM 的 previewDanmakuWindow）：与全屏播放页那一份刻意分开，见 VM 里的说明 */
+    danmaku: List<Danmaku> = emptyList(),
+    /**
+     * 这一格在播哪一集的 vid。DetailPreview 只带地址，vid 由详情页从集数表里按
+     * 「小屏在播第几集」的同一口径取出来传进来；空串 = 没有集数表，不装弹幕。
+     */
+    previewVid: String = "",
+    /** 拉/换弹幕窗口：由这一格自己的播放位置驱动，窗口阈值与节流都在 VM 里 */
+    onEnsureDanmaku: (String, Long) -> Unit = { _, _ -> },
+
+    /**
+     * 这一页在看的剧 cid：弹幕开关除了写全局设置，还要把「本剧覆盖」写成同一个值。
+     * 根播放页读的是 override.danmakuEnabled ?: settings.danmakuEnabled，只写前者的话，
+     * 用户在这部剧的播放页里单独调过弹幕后，这里关掉、进大屏仍然是开的。
+     */
+    cid: String = "",
+    /**
+     * 蜂窝 + 「流量播放提醒」开启，且地址还没装：这一格先展示封面 + 播放键。
+     *
+     * 由详情页按「网络类型 + 提醒开关」算好传进来，播放器不自己探测网络：
+     * 两个判据来源早晚会分叉，而这条分叉的代价是用户的流量。
+     */
+    trafficHold: Boolean = false,
+    /** 封面图（SeriesDetail.cover）：trafficHold 时铺在 16:9 里，让用户看见"这是哪部剧" */
+    cover: String = "",
+    /** 点了封面上的播放键：由详情页决定直接起播还是先弹确认卡 */
+    onRequestStart: () -> Unit = {},
+    /**
+     * 确认卡是否展开。状态由详情页持有：选集轨道那条入口也在页面里，
+     * 两处必须弹同一张卡——各 remember 一份的结果就是"点集号弹不出来"。
+     */
+    consentVisible: Boolean = false,
+    /** 确认卡「继续播放」；入参 = 勾了「不再提醒」（由详情页写进设置，播放器不碰设置域的键名） */
+    onConsentAccept: (dontAskAgain: Boolean) -> Unit = {},
+    /** 确认卡「取消」：收起卡片、回到封面 + 播放键，不装地址、不消耗流量 */
+    onConsentCancel: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -224,6 +290,19 @@ fun DetailPreviewPlayer(
     var controlsVisible by remember { mutableStateOf(false) }
     // 任何交互都 +1：自动收起的计时以它为准，key 变了旧计时自然被取消（同全屏页 controlsTick）
     var controlsTick by remember { mutableIntStateOf(0) }
+
+    // —— 弹幕 ——
+    // 开关 / 字号 / 区域全 App 只有一份（moda_player_settings）：这一格读的写的都是同一个键，
+    // 否则会出现"小屏关了、进全屏又开着"。播放器组件直读 store 是本仓库的既有做法（见 PlayerScreen），
+    // 这里沿用它，不往详情页的签名里再加一条设置通道。
+    val settingsStore = remember(context) { PlayerSettingsStoreImpl.create(context) }
+    // 「本剧覆盖」与播放页读写的是同一个 DataStore（键名 danmaku_<cid>）：弹幕开关要两个域
+    // 写同一个值，否则"小屏关了、大屏还开着"（播放页读的是 override 优先）
+    val overrideStore = remember(context) { PlaybackOverrideStoreImpl.create(context) }
+    var settings by remember { mutableStateOf(PlayerSettings()) }
+    LaunchedEffect(settingsStore) {
+        settings = settingsStore.current()
+    }
 
     // —— 进度 ——
     // 位置/时长只能轮询（PlayerEngine 只有 getter、没有进度回调），500ms 一次够拖动条用
@@ -328,6 +407,41 @@ fun DetailPreviewPlayer(
         if (e.isPlaying) e.pause() else e.play()
     }
 
+    /**
+     * 弹幕总开关的唯一落点：与全屏播放页读写的**同一个** [PlayerSettings]，
+     * 所以关掉之后进全屏也是关的。
+     *
+     * 乐观更新（先改本地渲染、再落盘）：这一格是"顺手看一眼"的位置，为一次写盘把图标卡住不值得；
+     * 写失败最多是下次进来回到旧值，与设置页那几处同一条约定。
+     */
+    fun toggleDanmaku() {
+        val next = settings.copy(danmakuEnabled = !settings.danmakuEnabled)
+        settings = next
+        scope.launch {
+            try {
+                settingsStore.save(next)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // 静默：开关没记住不影响播放
+            }
+            // 再把这一部的「本剧覆盖」写成同一个值。根播放页取的是
+            // override.danmakuEnabled ?: settings.danmakuEnabled，而覆盖是每部剧一条、
+            // 用户在播放页里单独调过就钉住了——只写 settings 的话，从这里关掉、
+            // 进大屏看同一部剧仍然是开的（"小屏关了、大屏还开着"）。
+            // 先 read 再 copy：core / decoder 那两项是播放页的，不许在这里被整条覆盖清掉。
+            if (cid.isNotBlank()) {
+                try {
+                    overrideStore.save(cid, overrideStore.get(cid).copy(danmakuEnabled = next.danmakuEnabled))
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // 静默：覆盖没写进去最多是"大屏沿用旧值"，不影响这一格
+                }
+            }
+        }
+    }
+
     /** 「我动过」的唯一入口：显示控制层 + 重置自动收起计时 */
     fun touchControls() {
         controlsVisible = true
@@ -371,7 +485,7 @@ fun DetailPreviewPlayer(
             }
 
             override fun onVideoSizeChanged(width: Int, height: Int) {
-                // 画面按 16:9 外框 FIT 缩放，这里不需要额外动作
+                // 外框固定 16:9、画面按 FIT 缩放：宽银幕的两条黑边是刻意留的，这里不需要动作
             }
         }
         e.listener = listener
@@ -473,7 +587,10 @@ fun DetailPreviewPlayer(
             // 从屏幕边缘上划可以临时唤出系统栏，但不会退出沉浸式
             controller?.systemBarsBehavior =
                 WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            controller?.hide(WindowInsetsCompat.Type.systemBars())
+            // **只藏导航条**：状态栏要一直看得见（时间/电量/信号），画面与控制层靠 fullscreen
+            // 那一支的 statusBarsPadding() 从状态栏下沿开始，谁也不会压到它下面
+            controller?.show(WindowInsetsCompat.Type.statusBars())
+            controller?.hide(WindowInsetsCompat.Type.navigationBars())
         }
         onDispose {
             controller?.show(WindowInsetsCompat.Type.systemBars())
@@ -481,8 +598,10 @@ fun DetailPreviewPlayer(
         }
     }
 
-    // 进出全屏的状态落点：进全屏先亮一次控制层（第一眼只有画面的话，看不出这是能点的播放器）；
-    // 退全屏把大屏才有的状态清掉——锁与面板不该在 16:9 那格里继续生效
+    // 进出全屏的状态落点：进全屏先亮一次控制层（第一眼只有画面的话，看不出这是能点的播放器），
+    // 之后交给同一条 3 秒自动收起的计时——它是 touchControls() 的副作用，不需要另起一个计时器。
+    // 退全屏把大屏才有的状态清掉——锁与面板不该在 16:9 那格里继续生效。
+    // **只有全屏这一支亮控制层**：小屏（非全屏）仍然是"点一下画面才出现"，那是详情页的既定语义。
     LaunchedEffect(fullscreen) {
         if (fullscreen) {
             touchControls()
@@ -500,6 +619,14 @@ fun DetailPreviewPlayer(
             durationMs = e.durationMs
             delay(500)
         }
+    }
+
+    // 弹幕窗口跟着**这一格自己的播放位置**走：上面那条轮询每 500ms 更新一次 positionMs，
+    // 这里只把它转给 VM——换窗阈值在 VM 里（越过窗口起点 30s 才重装），
+    // 所以这一句不会变成每秒两次 HTTP。引擎还没到或拿不到 vid（没有集数表）时不发。
+    val ensureDanmakuNow by rememberUpdatedState(onEnsureDanmaku)
+    LaunchedEffect(engine, previewVid, positionMs) {
+        if (engine != null && previewVid.isNotBlank()) ensureDanmakuNow(previewVid, positionMs)
     }
 
     // 电视上要显示的名字：与全屏页同一拼法（标题 · 集号），也就是 metadata 里的 dc:title。
@@ -594,7 +721,10 @@ fun DetailPreviewPlayer(
                 if (fullscreen) {
                     Modifier.fillMaxSize()
                 } else {
-                    Modifier.fillMaxWidth().aspectRatio(16f / 9f).clip(RoundedCornerShape(14.dp))
+                    // 直角、左右铺满、**外框固定 16:9**：宽银幕片子按 FIT 缩放在框内居中，
+                    // 上下留黑边——这是用户明确要的（"永远 16:9 固定高度，宽银幕就留黑边"）。
+                    // 别改成跟随 videoSize，那会让块高随片子跳、下面内容跟着上下移动。
+                    Modifier.fillMaxWidth().aspectRatio(16f / 9f)
                 },
             )
             .background(Color.Black),
@@ -618,6 +748,16 @@ fun DetailPreviewPlayer(
                 modifier = Modifier.fillMaxSize(),
             )
 
+            // 蜂窝 + 流量提醒开启：**地址还没装**，这一格先当封面用。
+            // 排在这里是关键——若落到下面 engine == null 那一支，用户看到的会是
+            // "正在准备播放…"的转圈：看起来已经开播了，其实我们正在等他按播放键。
+            trafficHold -> TrafficHoldCover(
+                cover = cover,
+                title = title,
+                onStart = onRequestStart,
+                modifier = Modifier.fillMaxSize(),
+            )
+
             engine == null -> PreviewPlaceholder(
                 message = if (loading) stringResource(R.string.core_player_preparing) else null,
                 showSpinner = loading,
@@ -635,6 +775,27 @@ fun DetailPreviewPlayer(
                 },
             )
         }
+
+        // 1b) 弹幕：直接复用全屏播放页那一份 [DanmakuOverlay]，不另写一套。
+        //     排在画面之后、手势层与控件层之前：Compose 的命中测试是「后画的先拿到」，
+        //     所以飘动的弹幕永远不会替用户吃掉一次点击。
+        //     控制层可见时把底行让出去（让多少见 [PreviewControlsBottomInset]），弹幕不压进度条。
+        //     enabled 跟随总开关：关掉时 Overlay 内部直接返回，不注册帧循环、零开销。
+        DanmakuOverlay(
+            danmaku = danmaku,
+            positionMs = positionMs,
+            playing = playing,
+            modifier = Modifier.fillMaxSize(),
+            bottomInset = when {
+                !controlsVisible && panel == null -> 0.dp
+                fullscreen -> ControlsBottomInset
+                else -> PreviewControlsBottomInset
+            },
+            enabled = settings.danmakuEnabled,
+            fontSizeSp = settings.danmakuSizeSp,
+            topRatio = settings.topRatio,
+            bottomRatio = settings.bottomRatio,
+        )
 
         // 2) 手势层：**一段** pointerInput，单击与纵滑在同一段里分派。
         //    不叠 detectTapGestures + detectDragGestures 两个检测器——它们互不知情，
@@ -714,44 +875,16 @@ fun DetailPreviewPlayer(
             )
         }
 
-        // 小屏四角：返回常驻 + 右上投屏/倍速 + 底行（播放/暂停 · 时间 · 进度条 · 总时长 · 全屏）。
+        // 小屏这一屏：左上返回 + 右上投屏/倍速/弹幕 + 底行（播放/暂停 · 时间 · 进度条 · 总时长 · 全屏）。
+        // 返回是这一屏里**唯一常驻**的控件（不随 controlsVisible 显隐）。
         // 全屏时整段不组合——全屏用下面那套大屏控件（ui/player），两套不会同时在屏上，
-        // 也就不会出现"两颗返回/两条进度条"的争抢。
+        // 也就不会出现"两条进度条"的争抢。
         if (!fullscreen) {
-            // 3) 返回：**纯图标**，绝对定位在卡片左上角（start 12 / top 12，固定值）。
-            //    它刻意**不挂**在上面那条渐变 Row 里：那条带子的高度会随 CastStatusChip 出现/消失、
-            //    随控件层显隐变化，一旦共用布局，返回就会跟着上下跳——这是用户截图里"跳来跳去"的来源。
-            //    没有圆底、没有边框、没有背景块（"应该就是一个图标"）；
-            //    用一层 1dp 的暗色副本当很轻的投影，保证亮画面上还看得见，也不破坏纯图标的观感。
-            Box(
-                Modifier
-                    .align(Alignment.TopStart)
-                    .padding(start = 12.dp, top = 12.dp)
-                    // 触控区仍 44dp；clip 只给水波纹一个形状，不画任何背景
-                    .size(44.dp)
-                    .clip(CircleShape)
-                    .clickable(onClick = onBack),
-                contentAlignment = Alignment.Center,
-            ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = null,
-                    tint = Color(0x59000000),
-                    modifier = Modifier.size(26.dp).offset(y = 1.dp),
-                )
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                    contentDescription = stringResource(R.string.search_back),
-                    tint = ModaColors.Text,
-                    modifier = Modifier.size(26.dp),
-                )
-            }
-
-            // 4) 顶部控制带：只承载右侧的投屏/倍速（返回已经独立在 3)），整宽、贴卡片边缘、
+            // 3) 顶部控制带：只承载右侧那三颗（投屏/倍速/弹幕），整宽、贴卡片边缘、
             //    **无圆角无左右 margin**。背景自上而下收黑（0xCC000000 → 全透明）：
             //    不是一块浮在画面上的深色贴纸，而是画面自己暗下去——片头黑底时看不出边界。
-            //    带子里没有任何常驻内容，所以它随控件层一起出现/消失，高度变化与返回无关。
-            //    top 也给 12dp：右侧两颗图标的顶边与返回按钮对齐，三者不会错开。
+            //    top 12 / 右 12 是固定的：带子里没有常驻内容，显隐与 CastStatusChip 的出现
+            //    都不会把这三颗图标推来推去。
             if (controlsVisible) {
                 Row(
                     Modifier
@@ -787,6 +920,22 @@ fun DetailPreviewPlayer(
                         icon = Icons.Filled.Speed,
                         description = stringResource(R.string.player_speed),
                         onClick = { speedSheetVisible = true },
+                    )
+                    // 弹幕开关：切的是全 App 那一个总开关（PlayerSettingsStore.danmakuEnabled），
+                    // 与全屏播放页底栏那颗、播放页「更多 → 弹幕」里的开关同一个落点。
+                    // 小屏自己不存第二份状态——那正是"小屏关了、全屏还开着"的来源。
+                    CornerIcon(
+                        icon = if (settings.danmakuEnabled) {
+                            Icons.Filled.Subtitles
+                        } else {
+                            Icons.Outlined.SubtitlesOff
+                        },
+                        description = stringResource(R.string.player_danmaku_enabled),
+                        tint = if (settings.danmakuEnabled) Color.White else Color.White.copy(alpha = 0.55f),
+                        onClick = {
+                            toggleDanmaku()
+                            touchControls()
+                        },
                     )
                 }
             }
@@ -860,6 +1009,11 @@ fun DetailPreviewPlayer(
                         },
                         // 仍是唯一的可伸缩元素：多了全屏一颗之后也不许把进度条挤没
                         modifier = Modifier.weight(1f).padding(horizontal = 4.dp),
+                        // 轨道与圆点自己画（见下面两个私有组件）：M3 默认是主题紫粗轨 + 带光晕的
+                        // 大圆点，塞进 16:9 的这一格里既笨重又看不出"播到哪儿"。
+                        // 手势语义一个字没改：拖动/点击仍由 Slider 自己处理，这里只换画法。
+                        thumb = { PreviewSliderThumb() },
+                        track = { state -> PreviewSliderTrack(state.coercedValueAsFraction) },
                     )
                     Text(
                         text = formatClock(durationMs),
@@ -916,6 +1070,8 @@ fun DetailPreviewPlayer(
                     durationMs = durationMs,
                     // 倍速只作状态提示；1.0 不写，否则底栏永远挂一句"1.0x"
                     speedLabel = if (speed != 1f) speedLabelOf(speed) else null,
+                    // 右下角圆钮写当前值（1.0x 也写）
+                    speedText = speedLabelOf(speed),
                     onTogglePlay = {
                         togglePlay()
                         touchControls()
@@ -939,10 +1095,17 @@ fun DetailPreviewPlayer(
                             panel = next
                         }
                     },
-                    // 详情页拿不到弹幕数据（弹幕跟着播放页的 vid 走），也没有弹幕层可渲染：
-                    // 这颗开关这一轮"无数据可切"，接线留到播放页路由退役时一起做
-                    danmakuEnabled = false,
-                    onToggleDanmaku = {},
+                    // 弹幕开关与上面那格小屏是**同一个**总开关（PlayerSettingsStore.danmakuEnabled），
+                    // 也是同一个窗口：全屏后引擎与这一集的 vid 都没变，弹幕照旧飘
+                    danmakuEnabled = settings.danmakuEnabled,
+                    onToggleDanmaku = {
+                        toggleDanmaku()
+                        touchControls()
+                    },
+                    // 「退出全屏」：这一页的全屏是**页内状态**，退的是布局而不是页面，
+                    // 所以右下角簇末尾也要有一颗写明动作的入口。它与顶栏那颗返回、
+                    // 系统返回键是同一个落点（onExitFullscreen），三处不会各退一层
+                    onExitFullscreen = onExitFullscreen,
                     modifier = Modifier.align(Alignment.BottomCenter).zIndex(2f),
                 )
             } else {
@@ -993,10 +1156,11 @@ fun DetailPreviewPlayer(
                 PlayerPanel.Speed -> SpeedSheet(
                     speed = speed,
                     onPick = { value ->
-                        // 与底栏/全屏页同一语义：即改即生效，面板自己不负责关闭
+                        // 即改即生效；面板照样在调用点收掉（SpeedSheet 被三处复用，不自关）
                         speed = value
                         engine?.setSpeed(value)
                         onSpeedChange(value)
+                        panel = null
                     },
                     onClose = { panel = null },
                 )
@@ -1062,12 +1226,26 @@ fun DetailPreviewPlayer(
             SpeedSheet(
                 speed = speed,
                 onPick = { value ->
-                    // 即改即生效：引擎与状态同步改，面板本身不负责关（与全屏页同一个语义）
+                    // 即改即生效：引擎与状态同步改
                     speed = value
                     engine?.setSpeed(value)
                     onSpeedChange(value)
+                    // 收面板放在**调用点**：SpeedSheet 被小屏/全屏/播放页三处复用，
+                    // 组件自己不负责关（关法各不相同），谁开谁关
+                    speedSheetVisible = false
                 },
                 onClose = { speedSheetVisible = false },
+            )
+        }
+
+        // 9) 流量确认卡：**盖在播放器这块 16:9 区域内**，不是全屏 AlertDialog，
+        //    也不是页面级弹窗——要拦的就是"这一格要不要开始耗流量"，
+        //    卡片浮到别处，用户看到的就只是"点了一下，屏幕上多了一个框"。
+        if (consentVisible) {
+            TrafficConsentCard(
+                onAccept = onConsentAccept,
+                onCancel = onConsentCancel,
+                modifier = Modifier.fillMaxSize().zIndex(3f),
             )
         }
     }
@@ -1186,6 +1364,183 @@ private fun PreviewPlaceholder(
                 }
             }
         }
+    }
+}
+
+/**
+ * 蜂窝 + 流量提醒开启时的"待起播"画面：封面照原样铺满 16:9，中间一颗播放键。
+ *
+ * 为什么是封面不是黑屏：这一格此刻**故意**没有装地址，黑屏加一句话会被读成"坏了"；
+ * 封面既回答了"我在看哪部剧"，也把"要点一下才开始"变成了形状上的暗示。
+ * 播放键 56dp：手指尺寸的圆底比图标本身更能说明这是一颗按钮（触控区就是这颗 56dp）。
+ */
+@Composable
+private fun TrafficHoldCover(
+    cover: String,
+    title: String,
+    onStart: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(modifier, contentAlignment = Alignment.Center) {
+        // 取不到封面时 RemoteImage 自己落成首字色块（附属功能失败不阻断主流程）
+        RemoteImage(
+            url = cover,
+            title = title,
+            modifier = Modifier.fillMaxSize(),
+            corner = 14.dp,
+        )
+        Box(
+            Modifier
+                .size(56.dp)
+                .clip(CircleShape)
+                .background(Color(0x99000000))
+                .clickable(onClick = onStart),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Filled.PlayArrow,
+                contentDescription = stringResource(R.string.detail_play),
+                tint = Color.White,
+                modifier = Modifier.size(30.dp),
+            )
+        }
+    }
+}
+
+/**
+ * 「当前是移动网络」确认卡：半透明遮罩 + 一句说明 + 「不再提醒」+ 继续/取消。
+ *
+ * 高度是硬约束：它必须装在 16:9 那一格里（360dp 宽的屏上约 185dp 高），所以
+ * 用 12dp 内边距、说明最多两行、勾选行 36dp、按钮行贴底——多一行就把它撑出画面。
+ *
+ * 「不再提醒」只是这张卡的临时勾选态：**点了「继续播放」才落盘**。
+ * 勾了又取消不该改变设置，否则用户"点了个取消，以后就再也不提醒了"。
+ */
+@Composable
+private fun TrafficConsentCard(
+    onAccept: (dontAskAgain: Boolean) -> Unit,
+    onCancel: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var dontAskAgain by remember { mutableStateOf(false) }
+    Box(
+        modifier
+            // 遮罩自己吃掉点击：否则点在卡片外面会穿到下面的手势层/画面
+            .background(Color(0xC0000000))
+            .pointerInput(Unit) { detectTapGestures { } },
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            Modifier
+                .padding(horizontal = 12.dp)
+                .clip(RoundedCornerShape(12.dp))
+                .background(Color(0xF21B1B20))
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+        ) {
+            Text(
+                text = stringResource(R.string.m_detail_traffic_message),
+                style = ModaType.Caption,
+                color = Color.White,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+            // 勾选行整行可点（36dp + 上下 4dp 内边距 ≈ 44dp 触控下限）：
+            // 只有 18dp 的方框自己能点的话，手指基本按不上
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(6.dp))
+                    .clickable { dontAskAgain = !dontAskAgain }
+                    .padding(vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                // 自绘小方框而不是 material3 Checkbox：后者带 48dp 最小触控区，
+                // 一行就吃掉这一格四分之一的高度
+                Box(
+                    Modifier
+                        .size(18.dp)
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(if (dontAskAgain) ModaColors.Accent else Color.Transparent)
+                        .border(
+                            width = 1.dp,
+                            color = if (dontAskAgain) ModaColors.Accent else Color.White.copy(alpha = 0.55f),
+                            shape = RoundedCornerShape(4.dp),
+                        ),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    if (dontAskAgain) {
+                        Icon(
+                            imageVector = Icons.Filled.Check,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(13.dp),
+                        )
+                    }
+                }
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = stringResource(R.string.m_detail_traffic_dont_ask),
+                    style = ModaType.Caption,
+                    color = Color.White.copy(alpha = 0.86f),
+                )
+            }
+            Row(
+                Modifier.fillMaxWidth().padding(top = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.End),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                TextButton(onClick = onCancel) {
+                    Text(
+                        text = stringResource(R.string.m_detail_traffic_cancel),
+                        style = ModaType.Caption,
+                        color = Color.White.copy(alpha = 0.86f),
+                    )
+                }
+                TextButton(onClick = { onAccept(dontAskAgain) }) {
+                    Text(
+                        text = stringResource(R.string.m_detail_traffic_play),
+                        style = ModaType.Caption,
+                        color = ModaColors.AccentSoft,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * 小屏进度条的圆点：12dp 纯白实心，**没有光晕、没有外扩内边距**。
+ *
+ * 不直接用 M3 默认 thumb：默认那颗按规范是 4dp 圆点 + halo + 一块 20dp 的 thumb 轨道高度，
+ * 在 16:9 这一格里显得又粗又模糊，而且自带左右各一圈留白，进度条看着比实际短。
+ * 拖动/点击的命中区不靠这颗：Slider 自己在整条轨道上接管手势，所以圆点画小不等于难点。
+ */
+@Composable
+private fun PreviewSliderThumb() {
+    Box(Modifier.size(12.dp).clip(CircleShape).background(Color.White))
+}
+
+/**
+ * 小屏进度条的轨道：3dp 高、全圆角，未播段白色 25% 不透明、已播段纯白。
+ *
+ * [fraction] 用 SliderState.coercedValueAsFraction（已按 valueRange 归一化）：
+ * 自己按 positionMs/durationMs 算会与 Slider 的夹取/步进各说各话，拖动预览时尤其明显。
+ */
+@Composable
+private fun PreviewSliderTrack(fraction: Float) {
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .height(3.dp)
+            .clip(CircleShape)
+            .background(Color.White.copy(alpha = 0.25f)),
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth(fraction.coerceIn(0f, 1f))
+                .fillMaxHeight()
+                .background(Color.White),
+        )
     }
 }
 

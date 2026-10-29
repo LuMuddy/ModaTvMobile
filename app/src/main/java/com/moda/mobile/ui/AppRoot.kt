@@ -402,10 +402,14 @@ private fun AuthorizedContent(vm: MainViewModel) {
             // 压栈页：没有底栏。搜索 / 历史 / 详情 / 播放 / 设置子页 / 已看完都落在这一支。
             // 播放页整屏交给播放器自己（它进入横向全屏、控制层浮在画面上），
             // 其余压栈页让开状态栏与手势区，否则标题会被状态栏压住、返回按钮落在手势区里。
-            val pageModifier = if (dest is Dest.Player) {
-                Modifier.fillMaxSize()
-            } else {
-                Modifier.fillMaxSize().safeDrawingPadding()
+            val pageModifier = when {
+                dest is Dest.Player -> Modifier.fillMaxSize()
+                // 详情页**自己**让状态栏：它顶部是一块贴顶的视频（播放器节点不参与列排版），
+                // 让外层统一 padding 与让本页 padding 是同一件事，但只有后者能保证
+                // "内容列与播放器节点拿到同一个数"——两处各写一次 inset 的算法，
+                // 迟早一处生效一处不生效（实测就是画面盖住了状态栏）。见 DetailScreen 的 statusBarTop。
+                dest is Dest.Detail -> Modifier.fillMaxSize()
+                else -> Modifier.fillMaxSize().safeDrawingPadding()
             }
             Box(pageModifier) {
                 Route(vm, dest, onOpenCopyright = { manualCopyright = true })
@@ -822,6 +826,9 @@ private fun DetailRoute(vm: MainViewModel, dest: Dest.Detail) {
     // 已看完的集号：选集网格右上角的「看完」角标靠它。跟着 detailCid 切流，
     // 从收藏页点进 A、返回、再点进 B 时会自动换成 B 的完成态，不会把 A 的角标带过去
     val completedIndexes by vm.detailCompletedIndexes.collectAsStateWithLifecycle()
+    // 流量播放提醒：与设置 → 播放设置里那颗 Switch 是**同一条流**（同一个 DataStore 键），
+    // 所以详情页里勾了「不再提醒」之后，设置页那颗开关的状态也跟着一起变
+    val playerSettings by vm.playerSettings.collectAsStateWithLifecycle()
     DetailScreen(
         detail = vm.detail,
         loading = vm.detailLoading,
@@ -872,6 +879,17 @@ private fun DetailRoute(vm: MainViewModel, dest: Dest.Detail) {
         previewError = vm.detailPreviewError,
         onLoadPreview = vm::loadDetailPreview,
         onClearPreview = vm::clearDetailPreview,
+        // 小屏弹幕：窗口只服务详情页那一格（与播放页的 danmakuWindow 分开，
+        // 两者 vid 不同，混用会互相清空）。位置由播放器自己的轮询回调。
+        danmaku = vm.previewDanmakuWindow,
+        onEnsureDanmaku = vm::ensurePreviewDanmaku,
+        // ---- 流量播放提醒（只有蜂窝才谈，判定见 data/NetKind）----
+        // 网络类型由 VM 探测后暴露成只读状态；onProbeNet 会把新鲜结论**返回**给屏幕，
+        // 自动起播的判定必须在同一步拿到它（等状态回流就晚了一次装地址）
+        netKind = vm.netKind,
+        onProbeNet = vm::probeNetKind,
+        cellularPrompt = playerSettings.cellularPrompt,
+        onSetCellularPrompt = vm::setCellularPrompt,
     )
 }
 

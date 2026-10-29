@@ -28,7 +28,10 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.BookmarkAdd
 import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.MoreHoriz
+import androidx.compose.material.icons.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PhotoCamera
@@ -72,6 +75,14 @@ import kotlin.math.roundToLong
 /**
  * 底部控制条占用的高度。
  * 弹幕层按它让位，否则弹幕会压在进度条与按钮上——与 TV 端 OsdBottomInset 同一个理由。
+ *
+ * 推导（两行各自独占高度，见 PlayerBottomBar）：
+ *   第一行 48dp（播放/暂停那颗 IconButton 的最小触控高）
+ * + 第二行 44dp（右下角簇的**命中区**高度：圆钮外观 36dp，但行高按 44dp 算）
+ * + Column 上下内边距 6（上）+ 8（下）、两行之间 2
+ * = 108dp，取 112dp 留一点余量（弹幕宁可早一步让位，也不要压住进度条）。
+ * **改动第二行高度时这个数必须一起减/加**：它是弹幕"让位多少"的唯一来源，
+ * 少算一行就会把飘过去的弹幕压在按钮上。
  */
 val ControlsBottomInset = 112.dp
 
@@ -89,8 +100,17 @@ private val ChipCorner = 8.dp
 private val ChipGap = 8.dp
 
 /** 右下角簇里的一颗按钮：44dp 触控高度，圆角与面板档位同一档 */
-private val BottomActionHeight = 44.dp
-private val BottomActionCorner = 10.dp
+/** 右下角簇每颗圆钮的**外观**直径：36dp 是"还认得出是按钮"的下限，再小就只剩图标像素了 */
+private val BottomActionSize = 36.dp
+
+/**
+ * 右下角簇每颗圆钮的**命中区**直径：44dp，AGENTS.md 的触摸纪律下限。
+ *
+ * 外观 36 / 命中 44 分两层而不是把圆画大：这一行在横屏底栏上，圆再大就会把上面的
+ * 进度条挤窄；而手指要的是够大的落点，不是够大的图案。行高按 44dp 算
+ * （见 ControlsBottomInset），所以相邻两颗的命中区不会重叠、视觉空隙也不会变大。
+ */
+private val BottomActionTouchSize = 44.dp
 
 /** 面板最大高度占屏高的比例：内容超出就在面板内部滚动，不把整屏顶满 */
 private const val SheetMaxHeightRatio = 0.7f
@@ -370,8 +390,15 @@ fun PlayerTopBar(
             .fillMaxWidth()
             .background(Brush.verticalGradient(listOf(Color(0xB3000000), Color(0x00000000)))),
     ) {
+        // 呼吸位：顶部 8dp、左右 12dp（原来 8dp）。**padding 必须写在 height 之前**——
+        // 反过来会让内边距吃掉 44dp 的内容高，图标与文字被压扁。
+        // 顶部这 8dp 有两重作用：状态栏可见时它是不贴状态栏的留白；某些设备横屏报出的
+        // 状态栏 inset 是 0（statusBarsPadding 等于没加），它就是唯一保证"不贴屏幕最上沿"的量。
         Row(
-            Modifier.fillMaxWidth().height(SheetTitleHeight).padding(horizontal = 8.dp),
+            Modifier
+                .fillMaxWidth()
+                .padding(start = 12.dp, end = 12.dp, top = 8.dp)
+                .height(SheetTitleHeight),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             IconButton(onClick = onBack) {
@@ -441,6 +468,8 @@ fun PlayerTopBar(
  * Slider 是第一行里唯一的可伸缩元素，第二行从行首空到行尾、只在末端排四个实心块。
  * 弹幕快捷开关留在第一行行尾，与时间/进度条同一条基线，只切总开关；
  * 字号/区域/边距仍走「更多 → 弹幕」那张完整面板。
+ * [onExitFullscreen] 非空时在右下角簇**最后**再追加一颗「退出全屏」：只有内嵌在别的页面里的
+ * 播放器才有这个态（详情页的页内全屏），根播放页本来就是整页播放，没有"退出全屏"可去。
  * 进度条用 material3 Slider：同时支持拖动与点按轨道跳转，触摸语义由组件自己保证。
  * 拖动期间只更新预览（[onSeekPreview]），松手才真正 seek（[onSeekCommit]）——
  * 否则每一帧拖动都会打一次 seek，播放器会被拖到卡死。
@@ -451,6 +480,11 @@ fun PlayerBottomBar(
     positionMs: Long,
     durationMs: Long,
     speedLabel: String?,
+    /** 右下角那颗倍速圆钮上写的**当前值**（1.0x / 1.25x / 1.5x）：与 [speedLabel] 不同，
+     *  它恒有值（1.0 也写），因为那一行只写值不写"倍速"两个字 */
+    speedText: String,
+    /** 码率圆钮上的当前清晰度短标签；null = 拿不到档位名，退回「清晰度」 */
+    qualityText: String? = null,
     onTogglePlay: () -> Unit,
     onNextEpisode: () -> Unit,
     nextEpisodeEnabled: Boolean,
@@ -459,6 +493,8 @@ fun PlayerBottomBar(
     onOpenPanel: (PlayerPanel) -> Unit,
     danmakuEnabled: Boolean,
     onToggleDanmaku: () -> Unit,
+    /** 非空 = 这台播放器是被"全屏"放大的，给一颗回到原页面的出口；根播放页不传 */
+    onExitFullscreen: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val totalSec = if (durationMs > 0L) durationMs / 1000f else 1f
@@ -477,7 +513,9 @@ fun PlayerBottomBar(
                 ),
             ),
     ) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+        // 底部内边距 6dp → 8dp：与顶栏那 8dp 同一量级，免得"一头挤一头松"。
+        // ControlsBottomInset 的推导里这一项跟着改（见那个常量的注释）。
+        Column(Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 6.dp, bottom = 8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = onTogglePlay) {
                     Icon(
@@ -551,26 +589,45 @@ fun PlayerBottomBar(
                     )
                 }
             }
-            // 右下角簇：倍速 / 码率 / 选集 / 更多，整行右对齐、间距 8dp。
+            // 右下角簇：倍速 / 码率 / 选集 / 更多（内嵌全屏再加退出全屏），整行右对齐、间距 8dp。
             // 它排在进度条那一行的**下一行**：两行各自独占高度，所以既不会挤窄进度条
             // （Slider 是第一行唯一的可伸缩元素），也不会盖住进度条的末端。
+            // 形态从 44dp 文字块改成 36dp 圆钮：第一行的信息量已经够重，第二行再摆五块实心
+            // 文字砖会压掉半个画面。文字项（倍速/码率）只写**当前值**，动作项用图标——
+            // 一行之内不再重复"这是什么面板"，用户点开就知道。
             Row(
                 Modifier.fillMaxWidth().padding(top = 2.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(ChipGap, Alignment.End),
             ) {
-                BottomActionChip(stringResource(R.string.player_speed)) {
+                // 倍速：写当前值（1.0x / 1.25x / 1.5x），不写"倍速"两个字——值本身就是入口
+                BottomCircleButton(text = speedText) {
                     onOpenPanel(PlayerPanel.Speed)
                 }
-                // 「码率」就是清晰度：档位列表与文案键全部沿用清晰度那一套
-                BottomActionChip(stringResource(R.string.player_quality)) {
+                // 「码率」就是清晰度：写当前档位的最短文案，拿不到档位名时退回「清晰度」
+                BottomCircleButton(text = qualityText ?: stringResource(R.string.player_quality)) {
                     onOpenPanel(PlayerPanel.Quality)
                 }
-                BottomActionChip(stringResource(R.string.player_episodes)) {
+                BottomCircleButton(
+                    icon = Icons.Filled.PlaylistPlay,
+                    description = stringResource(R.string.player_episodes),
+                ) {
                     onOpenPanel(PlayerPanel.Episode)
                 }
-                BottomActionChip(stringResource(R.string.m_player_more)) {
+                BottomCircleButton(
+                    icon = Icons.Filled.MoreHoriz,
+                    description = stringResource(R.string.m_player_more),
+                ) {
                     onOpenPanel(PlayerPanel.More)
+                }
+                // 退出全屏是这一行里的第五个动作，形态与上面四颗完全一致：
+                // 不许在底栏之外另浮一颗孤悬图标，也不许留两套按钮形态
+                if (onExitFullscreen != null) {
+                    BottomCircleButton(
+                        icon = Icons.Filled.FullscreenExit,
+                        description = stringResource(R.string.m_player_exit_fullscreen),
+                        onClick = onExitFullscreen,
+                    )
                 }
             }
         }
@@ -578,20 +635,44 @@ fun PlayerBottomBar(
 }
 
 /**
- * 右下角簇里的一颗动作按钮：44dp 高的实心圆角块（触控区达标），宽度由文字撑开。
+ * 右下角簇里的一颗圆钮：**外观 36dp 圆形半透明底，命中区 44dp**。
+ *
+ * 两层 Box 不是啰嗦：clickable 挂在 44dp 那层，否则触控区跟着图案缩到 36dp，
+ * 就破了 AGENTS.md 的「触控区 ≥ 44dp」。行高按 44dp 算（见 ControlsBottomInset），
+ * 所以按钮之间仍是"44dp 盒子 + 8dp 间距"，圆与圆的视觉空隙不会变大。
+ *
+ * 两种形态二选一——[text]（当前值，倍速/码率）或 [icon]（动作，选集/更多/退出全屏）。
+ * 不引两套组件：一行里形态不一致，用户会以为哪一颗坏了。
  */
 @Composable
-private fun BottomActionChip(label: String, onClick: () -> Unit) {
+private fun BottomCircleButton(
+    icon: ImageVector? = null,
+    description: String? = null,
+    text: String? = null,
+    onClick: () -> Unit,
+) {
     Box(
-        Modifier
-            .heightIn(min = BottomActionHeight)
-            .clip(RoundedCornerShape(BottomActionCorner))
-            .background(Color(0x33000000))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp),
+        Modifier.size(BottomActionTouchSize).clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
     ) {
-        Text(label, style = ModaType.Body, color = ModaColors.Text, maxLines = 1)
+        Box(
+            Modifier
+                .size(BottomActionSize)
+                .clip(CircleShape)
+                .background(Color(0x33000000)),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (icon != null) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = description,
+                    tint = ModaColors.Text,
+                    modifier = Modifier.size(20.dp),
+                )
+            } else {
+                Text(text.orEmpty(), style = ModaType.Caption, color = ModaColors.Text, maxLines = 1)
+            }
+        }
     }
 }
 

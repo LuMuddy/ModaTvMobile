@@ -39,6 +39,7 @@ import com.moda.mobile.data.local.HomeTabOrderStoreImpl
 import com.moda.mobile.data.local.IntroOutroRules
 import com.moda.mobile.data.local.IntroOutroStore
 import com.moda.mobile.data.local.IntroOutroStoreImpl
+import com.moda.mobile.data.NetKind
 import com.moda.mobile.data.local.PlayerSettings
 import com.moda.mobile.data.local.PlayerSettingsStore
 import com.moda.mobile.data.local.PlayerSettingsStoreImpl
@@ -473,6 +474,20 @@ class MainViewModel(private val app: Context) : ViewModel() {
      * 新任务刚置上的 [detailPreviewLoading] 抹掉——表现是一直不显示加载中。
      */
     private var detailPreviewToken = 0
+
+    /**
+     * 详情页**顶部小屏**的弹幕窗口。
+     *
+     * 与播放页的 [danmakuWindow] 刻意分成两份：两者的 vid 不是同一个
+     * （小屏在播续播集，全屏可能是用户在选集里点的另一集），共用一个 Job 和一份
+     * windowStart 就会互相清空——表现是小屏的弹幕刚飘起来、一进全屏就空了，或者反过来。
+     * 屏幕层只读这一份，换集/离开详情页由 [resetPreviewDanmaku] 清。
+     */
+    var previewDanmakuWindow by mutableStateOf<List<Danmaku>>(emptyList())
+        private set
+    private var previewDanmakuJob: Job? = null
+    private var previewDanmakuWindowStart = DANMAKU_NOT_LOADED
+    private var previewDanmakuVid: String? = null
 
     // ---- 播放 ----
     var player by mutableStateOf<PlayerUi>(PlayerUi.Loading)
@@ -1397,6 +1412,9 @@ class MainViewModel(private val app: Context) : ViewModel() {
         // 同一集已经装好就不再装：重组、从全屏页返回都会再调一次，
         // 重装会把正在播的画面打断（表现是每次回详情页都从头缓冲一遍）
         if (!detailPreviewLoading && detailPreview?.episodeIndex == episode.index && detailPreviewError == null) return
+        // 换集 = 换 vid：上一集的弹幕窗口在这里就作废，不能等新窗口回来才清
+        // （小屏会先播半秒新画面，那半秒里飘的是上一集的弹幕）
+        resetPreviewDanmaku()
         val token = ++detailPreviewToken
         detailPreviewJob?.cancel()
         detailPreviewLoading = true
@@ -1442,6 +1460,8 @@ class MainViewModel(private val app: Context) : ViewModel() {
         detailPreview = null
         detailPreviewLoading = false
         detailPreviewError = null
+        // 弹幕跟着一起清：下次进别的剧不许先闪一帧上一部的弹幕
+        resetPreviewDanmaku()
     }
 
     // ---------------- 历史 ----------------
@@ -1668,6 +1688,31 @@ class MainViewModel(private val app: Context) : ViewModel() {
         }
     }
 
+    /**
+     * 详情页的「不再提醒」与设置 → 播放设置里那颗「流量播放提醒」是**同一个键**
+     * （[PlayerSettings.cellularPrompt]）。两条入口共用这一个写入口：各存一份的话，
+     * 改一处另一处不会变，"不再提醒"点了也白点。
+     */
+    fun setCellularPrompt(enabled: Boolean) {
+        updatePlayerSettings(playerSettings.value.copy(cellularPrompt = enabled))
+    }
+
+    /**
+     * 详情页自动起播要用的网络类型。进详情页时探测一次，之后读这个只读快照
+     * （不常驻 NetworkCallback：这一页只需要"进来那一刻"的答案）。
+     * 写侧是 [probeNetKind]，所以外面拿不到一个能乱改的网络状态。
+     */
+    private var netKindState by mutableStateOf(NetKind.Other)
+    val netKind: NetKind get() = netKindState
+
+    /**
+     * 探测一次网络类型，写回 [netKind]，**并把结论返回**。
+     *
+     * 为什么必须返回值：详情页"要不要自动装地址"得在同一步就用上新鲜结论，
+     * 等状态回流到详情页已经晚了一步——那一步里蜂窝用户已经被装上的地址扣了流量。
+     */
+    fun probeNetKind(): NetKind = NetKind.probe(app).also { netKindState = it }
+
     // ============ 收藏模块（勿删）开始：流与操作 ============
 
     /**
@@ -1835,6 +1880,55 @@ class MainViewModel(private val app: Context) : ViewModel() {
         danmakuWindow = emptyList()
         danmakuWindowVid = null
         danmakuWindowStart = DANMAKU_NOT_LOADED
+    }
+
+    /**
+     * 详情页小屏的弹幕窗口：换窗规则与 [ensureDanmakuWindow] 逐条相同（同一组常量、
+     * 同一个「越过起点 30s 才换」的阈值），只是落在 [previewDanmakuWindow] 这份状态上，
+     * 理由见那里的说明。只由小屏自己的播放位置驱动（DetailPreviewPlayer 的 500ms 进度轮询）。
+     *
+     * 失败一律落空列表：弹幕是附属功能，接口挂了不弹错、不阻断起播（AGENTS.md 降级条款）。
+     */
+    fun ensurePreviewDanmaku(vid: String, positionMs: Long) {
+        if (vid.isBlank()) return
+        val pos = positionMs.coerceAtLeast(0L)
+        // 起点不能为负（后端不接受负区间）：片头 15 秒内窗口自然收缩成 [0, pos+45s)
+        val start = (pos - DANMAKU_LEAD_MS).coerceAtLeast(0L)
+        // 换集 = 换 vid。位置可能和上一集一模一样，所以 vid 不等就必须重装，
+        // 否则新一集会把上一集的弹幕原样飘出来
+        val reusable = previewDanmakuVid == vid &&
+            previewDanmakuWindowStart != DANMAKU_NOT_LOADED &&
+            pos >= previewDanmakuWindowStart &&
+            pos <= previewDanmakuWindowStart + DANMAKU_REFRESH_WITHIN_MS
+        if (reusable) return
+        // 新窗口开始就取消上一片的请求：连按 seek 不该积一堆没人要的结果
+        previewDanmakuJob?.cancel()
+        previewDanmakuVid = vid
+        previewDanmakuWindowStart = start
+        previewDanmakuJob = viewModelScope.launch {
+            val list = try {
+                Repo.danmaku(vid, start, start + DANMAKU_LENGTH_MS)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Repo 内部已降级，这层只保证异常不会逃出协程
+                emptyList()
+            }
+            // 结果回来时这一片可能已经不是当前窗口（换集/改位置）：丢掉，
+            // 否则上一段位置的弹幕会飘进当前画面
+            if (previewDanmakuVid != vid || previewDanmakuWindowStart != start) return@launch
+            // 空列表同样要赋值：本窗口确实没有弹幕，留着旧值反而会画出已经播过的那一段
+            previewDanmakuWindow = list
+        }
+    }
+
+    /** 清空小屏弹幕窗口。换集 / 离开详情页这些会话边界都要走这里 */
+    private fun resetPreviewDanmaku() {
+        previewDanmakuJob?.cancel()
+        previewDanmakuJob = null
+        previewDanmakuWindow = emptyList()
+        previewDanmakuVid = null
+        previewDanmakuWindowStart = DANMAKU_NOT_LOADED
     }
 
     /** 只有同一集的断点才值得续播，换集从头开始 */
