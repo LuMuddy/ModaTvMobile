@@ -242,7 +242,6 @@ object Api {
                 cover = v.optString("imgUrl"),
                 subtitle = strip(v.optString("subTitle"))
                     .ifBlank { strip(v.optString("highlightSubTitle")) },
-                desc = strip(v.optString("desc")),
                 badge = tags.joinToString(" · "),
             )
         }

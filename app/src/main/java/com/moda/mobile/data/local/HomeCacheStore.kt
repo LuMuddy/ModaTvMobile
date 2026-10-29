@@ -225,9 +225,9 @@ private object FeedJson {
 /**
  * VideoItem 的 JSON 编解码。
  *
- * 只序列化 8 个数据字段（cid / vid / title / cover / subtitle / desc / badge / categoryType），
- * **不序列化 wideCover / thumbCover**：那两个是 getter 派生值，写进磁盘既占体积，
- * 又会让「后来改了拼图规则」的旧缓存继续生效。
+ * 只序列化 7 个数据字段（cid / vid / title / cover / subtitle / badge / categoryType）。
+ * 派生值（拼图地址、角标文案）一律不落盘：写进磁盘既占体积，又会让「后来改了规则」
+ * 的旧缓存继续生效。
  *
  * 集数（episodeTotal / episodeUpdated）曾经在这里：首页改成解析 v.qq.com 的 HTML 后
  * HTML 里没有集数，字段恒为 0，连同角标一起删掉了。老缓存多出来的这两个键会被解码忽略。
@@ -249,8 +249,6 @@ internal object VideoItemJson {
             quote(sb, item.cover).append(',')
             quote(sb, "subtitle").append(':')
             quote(sb, item.subtitle).append(',')
-            quote(sb, "desc").append(':')
-            quote(sb, item.desc).append(',')
             quote(sb, "badge").append(':')
             quote(sb, item.badge).append(',')
             quote(sb, "categoryType").append(':')
@@ -272,7 +270,6 @@ internal object VideoItemJson {
             title = title,
             cover = map["cover"] as? String ?: "",
             subtitle = map["subtitle"] as? String ?: "",
-            desc = map["desc"] as? String ?: "",
             badge = map["badge"] as? String ?: "",
             // 老缓存里没有类型码这个键 → 0（UI 侧即「不画分类角标」）；
             // 类型不对（人手改过 / 未来改了编码）也走同一条路，不抛

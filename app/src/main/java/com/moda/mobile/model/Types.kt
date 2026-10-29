@@ -10,7 +10,6 @@ data class VideoItem(
     val title: String,
     val cover: String,
     val subtitle: String = "",
-    val desc: String = "",
     val badge: String = "",
     /**
      * 内容类型码，零网络成本地从 v.qq.com 页面取（[com.moda.mobile.data.HtmlCards] 解析 categoryType）。
@@ -21,27 +20,7 @@ data class VideoItem(
      * 为什么存码不存中文：文案要按语言取资源，码只是数据。
      */
     val categoryType: Int = 0,
-) {
-    /**
-     * 横版大图（首页主视觉专用）。
-     *
-     * 官网的背景是**节目剧照**（真实画面，1280x720），缩略图是**竖版海报**，
-     * 两者是不同类型的两张图，不是同一张裁出来的。腾讯图床对每个 vid 都有横版剧照：
-     *     http://puui.qpic.cn/vpic_cover/{vid}/{vid}_hz.jpg/0   → 实测 1280x720
-     * 没有 vid 时退回竖版海报（单条剧或老片可能取不到 vid），保证任何情况下都有图。
-     */
-    val wideCover: String get() = when {
-        vid.isNotBlank() -> "http://puui.qpic.cn/vpic_cover/$vid/${vid}_hz.jpg/0"
-        else -> cover
-    }
-
-    /** 竖版缩略图：主视觉下方的小图用这块裁切，与大图不是同一张构图 */
-    val thumbCover: String get() = when {
-        cover.isBlank() -> ""
-        cover.contains("imageMogr2") -> cover
-        else -> "$cover?imageMogr2/thumbnail/260x360!"
-    }
-}
+)
 
 /** 单集元数据（来自后端批量元数据响应的 items[].fields） */
 data class EpisodeMeta(
