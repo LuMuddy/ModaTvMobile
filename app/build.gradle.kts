@@ -1,8 +1,29 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
 }
+
+// 签名材料只从 local.properties 读（该文件被 .gitignore 排除），CI 在 runner 上临时写一份。
+// 四个键：moda.keystoreFile / moda.keystorePassword / moda.keyAlias / moda.keyPassword。
+// 前缀用 moda. 而不是 TV 端的 modatv.，是有意的：两端共用同一台机器的 local.properties 时
+// （本地开发常把两个工程放在一起），键名撞了就会拿 TV 的密钥去签手机包。
+val localSecrets = Properties().apply {
+    rootProject.file("local.properties").takeIf { it.isFile }?.inputStream()?.use { load(it) }
+}
+
+fun secret(key: String): String = localSecrets.getProperty(key).orEmpty()
+
+// 发版时由 CI 从 git tag 推导，用 -Pmoda.versionName / -Pmoda.versionCode 覆盖。
+// 先算成变量：产物文件名（ModaMobile<版本>.apk）也要拿版本名，只写在 defaultConfig 里就取不到了。
+//
+// 本地不带 -P 时就是首版常量 1 / 1.0.0，不做 TV 端那种「从 tag 推导 +1」：
+// 手机端的发版号一律由 CI 按 tag 序号生成（v1.0.0 → 1），本地包只是开发自测，
+// 让它去猜线上号既猜不准也会和 CI 算出两套值，对不上时就是一次装不上的版本。
+val appVersionName = (project.findProperty("moda.versionName") as String?) ?: "1.0.0"
+val appVersionCode = (project.findProperty("moda.versionCode") as String?)?.toIntOrNull() ?: 1
 
 android {
     namespace = "com.moda.mobile"
@@ -14,12 +35,12 @@ android {
         // 在 24 以下要么多打 multidex 补丁要么掉 API，24 是这套依赖能干净编译的最低点。
         minSdk = 24
         targetSdk = 34
-        // versionCode 的编码与 TV 端同一条公式：major*10000 + minor*100 + patch（1.0.0 → 10000）。
-        // 手机端首版没有 CI 发版流水线，所以不像 TV 端那样留 -P 覆盖口子——
-        // 等真的需要从 tag 推导时再加，现在多一个入口只会多一处对不上的地方。
-        // 每个版本段必须小于 100，否则会串段（1.0.100 与 1.1.0 撞号）。
-        versionCode = 10000
-        versionName = "1.0.0"
+        // 首版就是 1 / 1.0.0，与 TV 端的 major*10000+minor*100+patch 编码**不同**：
+        // 手机端的号由 .github/workflows/android-release.yml 按 tag 在版本序里的位置复算
+        // （v1.0.0 → 1、v1.0.1 → 2），改这里的常量不会影响线上包，改 CI 的推导才影响。
+        // versionCode 必须随每次发版严格递增，否则装着线上包的设备会拒绝安装（降级）。
+        versionCode = appVersionCode
+        versionName = appVersionName
 
         /**
          * 只保留手机真正常见的两个 ABI。
@@ -34,15 +55,27 @@ android {
     }
 
     /**
-     * 手机端首版不发签名包，所以这里不建 signingConfig、也不改产物文件名：
-     * TV 端那两处（local.properties 里读 keystore、onVariants 把产物改名成 ModaTv<版本>.apk）
-     * 都是为「Release 上挂的 asset 名 = 客户端拼的直链」这条契约服务的，
-     * 手机端的 asset 名契约（ModaMobile<版本>.apk）由 T6 的 UpdateSource 决定，
-     * 而现在既没有签名材料也没有写死的文件名，release 产物就是默认的 app-release-unsigned.apk。
+     * 签名材料只从 local.properties 读，那文件永远不进仓库。
+     * 没写 moda.keystoreFile 时不建 signingConfig，assembleRelease 会出未签名包——
+     * 装不上但编得过，本地只想看看 release 产物时不必先造密钥。
+     * CI 上必须签名：workflow 用 apksigner 校验产物，签没签由构建结果说话，不靠约定。
      */
+    val releaseKeystore = secret("moda.keystoreFile")
+    signingConfigs {
+        if (releaseKeystore.isNotBlank()) {
+            create("release") {
+                storeFile = rootProject.file(releaseKeystore)
+                storePassword = secret("moda.keystorePassword")
+                keyAlias = secret("moda.keyAlias")
+                keyPassword = secret("moda.keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.findByName("release")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
@@ -59,6 +92,28 @@ android {
         buildConfig = true
     }
     packaging { resources.excludes += "/META-INF/{AL2.0,LGPL2.1}" }
+}
+
+/**
+ * 产物文件名固定成 ModaMobile<版本>.apk。
+ *
+ * 这个名字是三处契约之一：Release 上挂的 asset 名、客户端拼的直链
+ * （data/UpdateSource.kt 的 apkUrl：/releases/download/v<版本>/ModaMobile<版本>.apk）、
+ * 以及这里。客户端不扫 asset 列表，拿版本号直接拼 URL，差一个字符就是一个 404，
+ * 而现场表现只是「下载失败」，极难定位。改名字要三处一起改，且已装的老客户端会用旧名字拼地址。
+ *
+ * outputFileName 只存在于 VariantOutputImpl（AGP 公开 API 没有这个口子），
+ * 升级 AGP 后这里编译不过就是它变了；真取不到时 CI 会以「找不到 ModaMobile<版本>.apk」报错，
+ * 不会静默发出去一个叫 app-release.apk 的资产。
+ */
+androidComponents {
+    onVariants(selector().withBuildType("release")) { variant ->
+        variant.outputs.forEach { output ->
+            (output as? com.android.build.api.variant.impl.VariantOutputImpl)
+                ?.outputFileName
+                ?.set("ModaMobile${appVersionName}.apk")
+        }
+    }
 }
 
 dependencies {
