@@ -137,7 +137,8 @@ object Repo {
         val uri = try {
             // 只读 eps 的 meta.pic：Parser 不在本次修复的边界内，解析就地写在这里，
             // 顺带把 /260 之外的非原图尺寸段统一收敛成 /0（见上面 hiRes 的说明）
-            Api.eps(cid).optJSONObject("meta")?.optString("pic").orEmpty()
+            // 走 EpsCache：这一条和同一 cid 的 CardSource 补全、详情页 series 共用一次请求
+            EpsCache.eps(cid, "高清封面").optJSONObject("meta")?.optString("pic").orEmpty()
         } catch (e: Exception) {
             // 高清图是「更好看」而不是「能看」，失败一律静默降级到 /260，不能影响首页
             Log.w(TAG, "高清封面获取失败（$cid）：${e.message}")
@@ -334,12 +335,16 @@ object Repo {
      * 置空之后：第一个进来的重新抓、其余在 [channelLock] 里排队，等锁释放后自然复用
      * 它刚写回的缓存，整页仍然只抓一次——既刷新了数据，也没有把并发变成 19 倍流量。
      *
-     * 只碰整页缓存。hlsByGuid / tierBlacklist / coverByCid 是播放与封面用的，
-     * 与「首页整页刷新」无关，清掉它们只会让用户白等一次重新解析。
+     * 除了两张整页缓存，还要作废 [EpsCache]：它缓存的是「每个 cid 补全出来的卡片」，
+     * 不清就等于刷新后原样拿到刚才那份 eps，用户点完刷新什么都没变。
+     *
+     * hlsByGuid / tierBlacklist / coverByCid 不在这里清：那是播放与封面用的，
+     * 与「首页整页刷新」无关，清掉只会让用户白等一次重新解析。
      */
     fun invalidateHomeCache() {
         channelCache.set(null)
         carouselCache.set(null)
+        EpsCache.clear()
     }
 
     // ---------- 搜索热词 ----------
@@ -448,7 +453,7 @@ object Repo {
         var actors: List<String> = emptyList()
         var category = ""
         try {
-            val eps = Api.eps(cid)
+            val eps = EpsCache.eps(cid, "详情页")
             vids = Parser.vids(eps)
             vip = Parser.vipSet(eps)
             title = Parser.seriesTitle(eps)

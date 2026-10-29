@@ -61,7 +61,6 @@ fun VideoCard(
     width: androidx.compose.ui.unit.Dp? = null,
     titleMaxLines: Int = 2,
     showSubtitle: Boolean = true,
-    preferHiRes: Boolean = false,
 ) {
     val corner = 12.dp
     val sized = if (width == null) modifier else modifier.width(width)
@@ -71,24 +70,27 @@ fun VideoCard(
                 url = item.cover,
                 title = item.title,
                 cid = item.cid,
-                preferHiRes = preferHiRes,
                 modifier = Modifier.fillMaxWidth().aspectRatio(3f / 4f),
                 corner = 0.dp,
             )
-            // 角标竖排：分类在上、集数在下。两个都压在右上角同一个角上，
+            // 角标竖排：分类在上，榜位/评分在下。两个都压在右上角同一个角上，
             // 分开 align 会互相盖住，所以它们必须共处一个 Column。
             Column(
                 modifier = Modifier.align(Alignment.TopEnd).padding(6.dp),
                 horizontalAlignment = Alignment.End,
             ) {
-                if (item.badge.isNotBlank()) {
-                    Badge(text = item.badge)
+                // 分类：由上游的类型码取资源（1 电影 / 2 电视剧 / 3 动漫 …），
+                // 复用 tab_* 那组文案——它们是同一个词，重复定义只会多一份要同步的翻译
+                val categoryRes = categoryRes(item.categoryType)
+                val category = if (categoryRes == 0) "" else stringResource(categoryRes)
+                if (category.isNotBlank()) {
+                    Badge(text = category)
                 }
-                val episode = episodeBadgeText(item.episodeTotal, item.episodeUpdated)
-                if (episode.isNotBlank()) {
-                    if (item.badge.isNotBlank()) Spacer(Modifier.height(4.dp))
-                    // 中性深色而不是主题强调色：集数是补充信息，不该跟分类角标抢同一种视觉权重
-                    Badge(text = episode, color = Color(0xA6000000))
+                // 榜位 / 评分：上游原文（"动作电影榜第1名" / "9.8分"），属于数据不是界面文案。
+                // 用中性深色而不是主题强调色：它是补充信息，不该跟分类抢同一种视觉权重
+                if (item.badge.isNotBlank()) {
+                    if (category.isNotBlank()) Spacer(Modifier.height(4.dp))
+                    Badge(text = item.badge, color = Color(0xA6000000))
                 }
             }
         }
@@ -115,18 +117,22 @@ fun VideoCard(
 }
 
 /**
- * 集数角标的文案；返回空串表示这一条不该有角标。
+ * 上游内容类型码 → 分类文案资源。0 = 未知（老缓存 / 后端条目），UI 侧不画角标。
  *
- * 第一道闸是 total > 1：电影（total == 1）与未知数据（total == 0）整块不画。
- * 「全 1 集」是噪音，「更新至 1 集」同样是——所以这道闸在分支上面，
- * 不能只挡「全 N 集」那一条。剩下的两条才是真信息：在更 vs 已完结。
- * 是 @Composable 而不是纯函数：数字要进句子，句子只能来自 string 资源。
+ * 码值是 v.qq.com 卡片里的 categoryType 实测取值（HtmlCards 解析）。
+ * 文案复用 tab_*：分类角标说的就是这几个词，另开一组只会多一份要同步的翻译。
  */
-@Composable
-private fun episodeBadgeText(total: Int, updated: Int): String = when {
-    total <= 1 -> ""
-    updated > 0 -> stringResource(R.string.m_feed_episode_updated, updated)
-    else -> stringResource(R.string.m_feed_episode_total, total)
+private fun categoryRes(categoryType: Int): Int = when (categoryType) {
+    1 -> R.string.tab_movie
+    2 -> R.string.tab_tv
+    3 -> R.string.tab_cartoon
+    4 -> R.string.tab_sports
+    9 -> R.string.tab_doco
+    10 -> R.string.tab_variety
+    29 -> R.string.tab_auto
+    106 -> R.string.tab_child
+    111 -> R.string.tab_art
+    else -> 0
 }
 
 /**

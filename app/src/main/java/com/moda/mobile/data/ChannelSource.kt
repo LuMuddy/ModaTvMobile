@@ -9,7 +9,6 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
-import kotlinx.coroutines.withContext
 
 /**
  * 首页各行的数据来源：v.qq.com 官方频道页。
@@ -84,8 +83,8 @@ object ChannelSource {
      * ViewModel 的持久化缓存顶上。
      */
     suspend fun loadAll(): List<Row> = coroutineScope {
-        // 抓 HTML 和补全 meta 用同一个整页信号量：抓 19 个频道页 + 补上百个 cid
-        // 全部排在 4 个许可后面，任何时刻对外的并发请求数都不会超过 PARALLEL
+        // 整页共享一个信号量：17 个频道页的 HTML 抓取全部排在 4 个许可后面。
+        // 卡片数据就在同一份 HTML 里，抓完即解析完成——不再有「再补几百个 cid」那一段
         val sem = Semaphore(PARALLEL)
         val rows = Channel.entries.map { ch ->
             async(Dispatchers.IO) {
@@ -105,22 +104,21 @@ object ChannelSource {
         rows
     }
 
-    /** 单频道：频道页 → cid 列表 → 并发补全；单条失败只跳过该条 */
+    /**
+     * 单频道：抓频道页 HTML → 直接解析出整行卡片。
+     *
+     * 以前这里分两步（先抠 cid、再逐个打自家 eps 补全），17 个频道合计约 165 次
+     * eps；而卡片数据本来就在这份 HTML 里，现在已经没有第二步了。
+     */
     private suspend fun loadChannel(ch: Channel, sem: Semaphore): List<VideoItem> {
-        val cids = sem.withPermit { CarouselSource.fetchCids(ch.url, ROW_CIDS) }
-        if (cids.isEmpty()) {
-            Log.w(TAG, "频道「${ch.title}」未解析出任何 cid（页面结构可能已改版）")
+        val items = sem.withPermit { CarouselSource.fetchCards(ch.url, ROW_CIDS) }
+        if (items.isEmpty()) {
+            Log.w(TAG, "频道「${ch.title}」未解析出任何卡片（页面结构可能已改版）")
             return emptyList()
         }
-        val items = coroutineScope {
-            cids.map { cid ->
-                async(Dispatchers.IO) { sem.withPermit { CarouselSource.enrich(cid) } }
-            }.awaitAll()
-        }.filterNotNull()
         Log.i(
             TAG,
-            "频道「${ch.title}」：${cids.size} 个 cid，补全 ${items.size} 条，" +
-                "前三 ${items.take(3).joinToString("/") { it.title }}"
+            "频道「${ch.title}」：${items.size} 条，前三 ${items.take(3).joinToString("/") { it.title }}"
         )
         return items
     }

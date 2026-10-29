@@ -22,13 +22,6 @@
       「代码里不出现中文字面量」这条规则（契约 §1）；按 '|' 切开逐个做 contains 判断。
       与 TV 端 DetailScreen.kt 的 TRAILER_KEYS 同一份清单、同一顺序。
     -->
-    <!--
-      首页卡片的集数角标。数据来自 eps.meta 的 episode_all（总集数）与 video_num（已更到第几集）。
-      两者都缺时不画角标，所以这里只写「确实有数据」的两种说法。
-    -->
-    <string name="m_feed_episode_total">全 %1$d 集</string>
-    <string name="m_feed_episode_updated">更新至 %1$d 集</string>
-
     <string name="m_feed_trailer_keywords">预告片|预告|花絮|彩蛋|片头|片尾|宣传片|片花|独家|幕后|采访|速看|前瞻</string>
 
 </resources>

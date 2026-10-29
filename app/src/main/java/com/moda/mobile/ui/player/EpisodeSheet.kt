@@ -102,7 +102,6 @@ fun EpisodeSheet(
                             title = episode.label,
                             modifier = Modifier.fillMaxSize(),
                             corner = EpisodeCorner,
-                            preferHiRes = false,
                         )
                         if (isTrailer) {
                             EpisodeBadge(

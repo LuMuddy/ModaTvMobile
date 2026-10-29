@@ -225,8 +225,12 @@ private object FeedJson {
 /**
  * VideoItem 的 JSON 编解码。
  *
- * 只序列化 9 个数据字段，**不序列化 wideCover / thumbCover**：那两个是 getter 派生值，
- * 写进磁盘既占体积，又会让「后来改了拼图规则」的旧缓存继续生效。
+ * 只序列化 8 个数据字段（cid / vid / title / cover / subtitle / desc / badge / categoryType），
+ * **不序列化 wideCover / thumbCover**：那两个是 getter 派生值，写进磁盘既占体积，
+ * 又会让「后来改了拼图规则」的旧缓存继续生效。
+ *
+ * 集数（episodeTotal / episodeUpdated）曾经在这里：首页改成解析 v.qq.com 的 HTML 后
+ * HTML 里没有集数，字段恒为 0，连同角标一起删掉了。老缓存多出来的这两个键会被解码忽略。
  */
 internal object VideoItemJson {
 
@@ -249,10 +253,8 @@ internal object VideoItemJson {
             quote(sb, item.desc).append(',')
             quote(sb, "badge").append(':')
             quote(sb, item.badge).append(',')
-            quote(sb, "episodeTotal").append(':')
-            sb.append(item.episodeTotal).append(',')
-            quote(sb, "episodeUpdated").append(':')
-            sb.append(item.episodeUpdated)
+            quote(sb, "categoryType").append(':')
+            sb.append(item.categoryType)
             sb.append('}')
         }
         sb.append(']')
@@ -272,10 +274,9 @@ internal object VideoItemJson {
             subtitle = map["subtitle"] as? String ?: "",
             desc = map["desc"] as? String ?: "",
             badge = map["badge"] as? String ?: "",
-            // 老缓存里没有这两个键 → 落 0（UI 侧即「不画角标」）；
+            // 老缓存里没有类型码这个键 → 0（UI 侧即「不画分类角标」）；
             // 类型不对（人手改过 / 未来改了编码）也走同一条路，不抛
-            episodeTotal = (map["episodeTotal"] as? Number)?.toInt() ?: 0,
-            episodeUpdated = (map["episodeUpdated"] as? Number)?.toInt() ?: 0,
+            categoryType = (map["categoryType"] as? Number)?.toInt() ?: 0,
         )
     }
 

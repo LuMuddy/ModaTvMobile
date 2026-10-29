@@ -18,7 +18,6 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import com.moda.mobile.data.Repo
 import com.moda.mobile.ui.theme.ModaColors
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -83,16 +82,14 @@ private suspend fun loadBitmap(url: String): Bitmap? = withContext(Dispatchers.I
 }
 
 /**
- * 封面图，三级回退，任何一级失败都不会白屏：
+ * 封面图，两级回退，任何一级失败都不会白屏：
  *
- *   1. 高清原图：Repo.hiResCover(cid) → eps 的 meta.pic（原图 /0，实测 770x1080）
- *   2. 缩略图：url 参数，即 item.cover（/260，实测 260x364 / 35KB）
- *   3. 色块：CoverBlock 首字兜底
+ *   1. url 参数本身（首页卡片是 v.qq.com 给的竖版海报，详情页是 eps.meta.pic）
+ *   2. 色块：CoverBlock 首字兜底
  *
- * 为什么第 1 级按需开启（preferHiRes）：eps 是重接口，会返回整部剧的全部 vids。
- * 列表一屏十几张卡逐个调 eps 会让首屏明显变慢，而小卡用 /260 的图显示时放大倍数不到 1x，
- * 本来就清晰。所以只有大图（详情页头图、首屏少数几张）才值得换高清——
- * 这是有意的取舍，不是漏改。
+ * 原来还有第 0 级「preferHiRes → Repo.hiResCover(cid)」，即为了更清晰的图再打一次 eps。
+ * 首页改成解析 v.qq.com 的 HTML 之后，那一级没有任何调用点传 true 了：卡片图本来就在
+ * 页面里，再为它打一次重接口只是把刚砍掉的并发放回来。整个参数一并删掉。
  */
 @Composable
 fun RemoteImage(
@@ -102,7 +99,6 @@ fun RemoteImage(
     corner: Dp = 12.dp,
     contentScale: ContentScale = ContentScale.Crop,
     cid: String = "",
-    preferHiRes: Boolean = false,
     /** 图加载完成（成功或回落到色块）时回调，供调用方做「垫底图」之类的连续性处理 */
     onLoaded: (Boolean) -> Unit = {},
 ) {
@@ -110,21 +106,7 @@ fun RemoteImage(
     // 即便图早就在缓存里也要等一次协程调度；那一帧会先画成文字色块，
     // 视觉上就是「滑下去再滑回来，图片闪成文字又变回图片」。同步命中即可不闪。
     val cached = remember(url) { if (url.isBlank()) null else imageCache.get(url) }
-    val bitmap by produceState<Bitmap?>(initialValue = cached, url, cid, preferHiRes) {
-        // 第 1 级倾向高清，但**先看 url 本身是不是已经是原图**：
-        // 详情头图的 cover 就是 eps.meta.pic（/0 结尾原图），再调 hiResCover(cid)
-        // 等于为重接口 eps 再打一次，大图还会长时间停在色块。已经够大就直接用。
-        val urlIsAlreadyHiRes = url.contains("/0") || url.contains("/1080")
-        if (preferHiRes && cid.isNotBlank() && !urlIsAlreadyHiRes) {
-            val hi = runCatching { Repo.hiResCover(cid) }.getOrDefault("")
-            if (hi.isNotBlank()) {
-                loadBitmap(hi)?.let { hit ->
-                    value = hit
-                    return@produceState
-                }
-            }
-        }
-        // 第 2 级：直接用传入的地址
+    val bitmap by produceState<Bitmap?>(initialValue = cached, url, cid) {
         value = if (url.isBlank()) null else loadBitmap(url)
     }
     val current = bitmap

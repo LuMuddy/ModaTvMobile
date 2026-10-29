@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -27,7 +26,6 @@ import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.outlined.History
 import androidx.compose.material3.CircularProgressIndicator
@@ -94,14 +92,6 @@ private const val GRID_COLUMNS = 3
  * 完整记录去历史页看。历史流本身已按 updatedAt 倒序，取前 5 条即「最近看的 5 条」。
  */
 private const val CONTINUE_WATCHING_LIMIT = 5
-
-/**
- * 首屏预取高清封面的卡片数。
- *
- * 只给推荐 tab 最前面这几张：它们是最可能被先看到的卡，
- * 同时把首屏的 eps 请求数压到个位数（见 RemoteImage 里的取舍说明）。
- */
-private const val HI_RES_PREFETCH_COUNT = 6
 
 /**
  * 首页：品牌条 + 分类条 + 内容网格。
@@ -323,12 +313,9 @@ fun HomeScreen(
                 val pageFeed = feeds[pageTab]
                 val pageItems = pageFeed?.items.orEmpty()
                 val pageIsRecommend = pageTab == HomeTab.Recommend
-                // 高清封面只预取推荐页最前面几张，其它页一张都不取
-                val pagePrefetchCids = if (pageIsRecommend) {
-                    pageItems.take(HI_RES_PREFETCH_COUNT).map { it.cid }.toSet()
-                } else {
-                    emptySet()
-                }
+                // 不再预取「高清封面」：卡片图（竖版海报）已经随 v.qq.com 的 HTML 一起拿到。
+                // 那一版的语义是「为这张卡再打一次 eps 换大图」，而首页现在对后端零请求——
+                // 为一张略清晰的图把 6 条 eps 加回去，等于把刚砍掉的并发又放回来。
                 when {
                     // 「错误只在没有任何数据时才露脸」：有内容时请求失败必须静默——
                     // 用户看到的仍然是能用的那一屏。判的都是**这一页**的 feed
@@ -355,7 +342,6 @@ fun HomeScreen(
                         // 只有推荐页拿得到这段，另外 18 页恒为空，那一段也就不出现。
                         history = if (pageIsRecommend) history.take(CONTINUE_WATCHING_LIMIT) else emptyList(),
                         loading = loading,
-                        prefetchCids = pagePrefetchCids,
                         onOpenDetail = onOpenDetail,
                         onResumeHistory = onResumeHistory,
                     )
@@ -556,7 +542,6 @@ private fun FeedGrid(
     items: List<VideoItem>,
     history: List<LibraryEntry>,
     loading: Boolean,
-    prefetchCids: Set<String>,
     onOpenDetail: (String, String) -> Unit,
     onResumeHistory: (LibraryEntry) -> Unit,
 ) {
@@ -569,11 +554,7 @@ private fun FeedGrid(
         verticalArrangement = Arrangement.spacedBy(14.dp),
     ) {
         itemsIndexed(items = items, key = { _, item -> "${tab.name}-${item.cid}" }) { _, item ->
-            VideoCard(
-                item = item,
-                onClick = { onOpenDetail(item.cid, item.title) },
-                preferHiRes = prefetchCids.contains(item.cid),
-            )
+            VideoCard(item = item, onClick = { onOpenDetail(item.cid, item.title) })
         }
 
         if (history.isNotEmpty()) {

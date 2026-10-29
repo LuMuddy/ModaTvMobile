@@ -12,10 +12,15 @@ data class VideoItem(
     val subtitle: String = "",
     val desc: String = "",
     val badge: String = "",
-    /** 总集数（eps.meta.episode_all）；0 = 未知，单集/电影常态为 1 */
-    val episodeTotal: Int = 0,
-    /** 已更新到第几集（eps.meta.video_num）；0 = 未知或尚未开播 */
-    val episodeUpdated: Int = 0,
+    /**
+     * 内容类型码，零网络成本地从 v.qq.com 页面取（[com.moda.mobile.data.HtmlCards] 解析 categoryType）。
+     *
+     * 实测取值：1 电影 / 2 电视剧 / 3 动漫 / 4 体育赛事 / 9 纪录片 / 10 综艺栏目 /
+     * 29 汽车 / 106 少儿 / 111 文化历史。0 = 未知（老缓存 / 后端来的条目），UI 侧即不画角标。
+     *
+     * 为什么存码不存中文：文案要按语言取资源，码只是数据。
+     */
+    val categoryType: Int = 0,
 ) {
     /**
      * 横版大图（首页主视觉专用）。
