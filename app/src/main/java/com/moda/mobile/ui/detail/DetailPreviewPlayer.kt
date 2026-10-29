@@ -587,10 +587,10 @@ fun DetailPreviewPlayer(
             // 从屏幕边缘上划可以临时唤出系统栏，但不会退出沉浸式
             controller?.systemBarsBehavior =
                 WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            // **只藏导航条**：状态栏要一直看得见（时间/电量/信号），画面与控制层靠 fullscreen
-            // 那一支的 statusBarsPadding() 从状态栏下沿开始，谁也不会压到它下面
-            controller?.show(WindowInsetsCompat.Type.statusBars())
-            controller?.hide(WindowInsetsCompat.Type.navigationBars())
+            // 全屏就是**整块屏幕都是画面**：状态栏与导航条一起藏（Type.systemBars()），
+            // 不再单独 show 状态栏——留着它，画面顶上永远挂一条 24dp 的黑边，
+            // 用户会觉得"这根本没全屏"。看时间电量不是播放页的职责。
+            controller?.hide(WindowInsetsCompat.Type.systemBars())
         }
         onDispose {
             controller?.show(WindowInsetsCompat.Type.systemBars())

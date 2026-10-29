@@ -647,9 +647,10 @@ fun DetailScreen(
                 .zIndex(if (fullscreen) 2f else 1f)
                 .then(
                     if (fullscreen) {
-                        // 全屏也让出状态栏（与内容列同一个 [statusBarTop]）：画面、弹幕、手势、
-                        // 控制层都是这颗节点的子节点，一处生效就全部对齐
-                        Modifier.fillMaxSize().padding(top = statusBarTop)
+                        // 全屏**不让出任何一条**：状态栏已经在 DetailPreviewPlayer 里被藏掉
+                        // （hide(systemBars)），再 pad 一遍 statusBarTop 就是画面顶上一条黑边。
+                        // 画面、弹幕、手势、控制层都是这颗节点的子节点，一处生效就全部对齐
+                        Modifier.fillMaxSize()
                     } else {
                         // 与上面那个 Spacer 同一条链、同一个顺序：高度必须严丝合缝。
                         // top 用**同一个 [statusBarTop]**（不是 statusBarsPadding）：

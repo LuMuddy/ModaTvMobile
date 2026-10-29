@@ -886,12 +886,12 @@ fun PlayerScreen(
         // 从屏幕边缘上划可以临时唤出系统栏，但不会退出沉浸式
         controller?.systemBarsBehavior =
             WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        // **只藏导航条**：状态栏（时间/电量/信号）要一直看得见——藏掉它，用户就不知道现在几点，
-        // 也看不懂为什么画面顶着屏幕边。show(statusBars) 与 hide 成对写在这里：
-        // 上一个页面可能把它藏过（沉浸式），进播放页必须显式要回来，不能靠"没藏过"。
-        // 画面/弹幕/控制层靠根 Box 的 statusBarsPadding() 从状态栏下沿开始，不会压住时间与电量。
-        controller?.show(WindowInsetsCompat.Type.statusBars())
-        controller?.hide(WindowInsetsCompat.Type.navigationBars())
+        // 沉浸式：状态栏与导航条一起藏（systemBars）。播放页是整块屏幕的画面，
+        // 顶上留一条 24dp 给时间和电量，等于永远不算全屏。
+        // 显式 hide 而不是"没藏过"：上一个页面可能刚把系统栏 show 回来。
+        // 根 Box 那个 statusBarsPadding() 保留——hide 之后 inset 归零，它自动变成 0，
+        // 万一系统把栏摸出来了，控件也不会被压在栏底下。
+        controller?.hide(WindowInsetsCompat.Type.systemBars())
         onDispose {
             controller?.show(WindowInsetsCompat.Type.systemBars())
             activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
@@ -940,15 +940,12 @@ fun PlayerScreen(
                     engine.pause()
                 }
                 Lifecycle.Event.ON_RESUME -> {
-                    // 回到前台系统栏可能已经回来了，重新进沉浸式——但**只收导航条**：
-                    // 状态栏要显式 show 回来（切后台期间可能被别的页面/系统改过）
+                    // 回到前台系统栏可能已经回来了，重新进沉浸式：状态栏与导航条一起藏，
+                    // 与进页那一段同一条口径（两处不一致会出现"回前台后状态栏又冒出来"）
                     val window = activity?.window
                     if (window != null) {
                         WindowInsetsControllerCompat(window, window.decorView)
-                            .apply {
-                                show(WindowInsetsCompat.Type.statusBars())
-                                hide(WindowInsetsCompat.Type.navigationBars())
-                            }
+                            .hide(WindowInsetsCompat.Type.systemBars())
                     }
                 }
                 else -> Unit
