@@ -34,7 +34,6 @@ import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PhotoCamera
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.Subtitles
@@ -115,10 +114,13 @@ private val BottomActionTouchSize = 44.dp
 /** 面板最大高度占屏高的比例：内容超出就在面板内部滚动，不把整屏顶满 */
 private const val SheetMaxHeightRatio = 0.7f
 
-/** 面板内容可用的最大高度（七个面板都从这里取，保证同一块屏上一样高） */
+/**
+ * 面板内容可用的最大高度（七个面板都从这里取，保证同一块屏上一样高）。
+ * [ratio] 只给"浏览型"面板开口子（选集要看得见更多格子），默认值就是七张面板的统一比例。
+ */
 @Composable
-fun playerSheetMaxContentHeight(): Dp =
-    LocalConfiguration.current.screenHeightDp.dp * SheetMaxHeightRatio
+fun playerSheetMaxContentHeight(ratio: Float = SheetMaxHeightRatio): Dp =
+    LocalConfiguration.current.screenHeightDp.dp * ratio
 
 /**
  * 播放页的面板身份：一个枚举值 = 一张半屏面板。
@@ -215,10 +217,10 @@ fun PlayerSheet(
     title: String,
     onClose: () -> Unit,
     scrollable: Boolean = true,
+    maxHeight: Dp = playerSheetMaxContentHeight(),
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    val maxHeight = playerSheetMaxContentHeight()
     ModalBottomSheet(
         onDismissRequest = onClose,
         sheetState = sheetState,
@@ -227,6 +229,8 @@ fun PlayerSheet(
         containerColor = ModaColors.Surface,
         contentColor = ModaColors.Text,
     ) {
+        // 面板是独立窗口：不在这里再藏一次系统栏，横屏那条导航栏就会压在面板右边缘上
+        HideSystemBarsInDialogWindow()
         Column(
             Modifier
                 .fillMaxWidth()
@@ -688,41 +692,6 @@ private fun BottomCircleButton(
                 Text(text.orEmpty(), style = ModaType.Caption, color = ModaColors.Text, maxLines = 1)
             }
         }
-    }
-}
-
-/** 画面右侧竖排按钮的直径：与顶栏图标按钮同一档，44dp 触控区达标 */
-private val SideActionSize = 44.dp
-
-/**
- * 画面右侧竖排（竖屏手机上贴右边缘）的一颗按钮，形态同优酷的侧栏：
- * 44dp 圆形半透明底 + 居中图标。它不属于底栏两行，所以单独一个 composable——
- * 底栏的行高与「四角不许出现孤悬图标」这两条既有规则都不受影响。
- *
- * [enabled] = false 时**置灰但仍可点**：点下去由调用方说明为什么用不了（例如系统版本不够），
- * 比一颗点不动也问不出原因的按钮清楚——与清晰度面板把「不可用」写进标签同一个理由。
- */
-@Composable
-fun PlayerSideAction(
-    imageVector: ImageVector,
-    contentDescription: String,
-    onClick: () -> Unit,
-    enabled: Boolean = true,
-    modifier: Modifier = Modifier,
-) {
-    Box(
-        modifier
-            .size(SideActionSize)
-            .clip(CircleShape)
-            .background(Color(0x66000000))
-            .clickable(onClick = onClick),
-        contentAlignment = Alignment.Center,
-    ) {
-        Icon(
-            imageVector = imageVector,
-            contentDescription = contentDescription,
-            tint = if (enabled) Color.White else Color.White.copy(alpha = 0.4f),
-        )
     }
 }
 

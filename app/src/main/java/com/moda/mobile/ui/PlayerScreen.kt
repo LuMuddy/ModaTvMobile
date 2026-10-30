@@ -1,20 +1,13 @@
 package com.moda.mobile.ui
 
-import android.content.ContentValues
 import android.content.Context
 import android.content.pm.ActivityInfo
-import android.graphics.Bitmap
 import android.media.AudioManager
 import android.os.Build
-import android.os.Environment
-import android.os.Handler
-import android.os.Looper
 import android.provider.MediaStore
 import android.util.Log
-import android.view.PixelCopy
 import android.view.SurfaceHolder
 import android.view.SurfaceView
-import android.view.TextureView
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
@@ -34,6 +27,7 @@ import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -49,8 +43,9 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.BrightnessMedium
 import androidx.compose.material.icons.filled.LockOpen
-import androidx.compose.material.icons.filled.PhotoCamera
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -125,7 +120,6 @@ import com.moda.mobile.ui.player.PlayerEngine
 import com.moda.mobile.ui.player.PlayerEngines
 import com.moda.mobile.ui.player.PlayerErrorPane
 import com.moda.mobile.ui.player.PlayerPanel
-import com.moda.mobile.ui.player.PlayerSideAction
 import com.moda.mobile.ui.player.QualitySheet
 import com.moda.mobile.ui.player.SpeedSheet
 import com.moda.mobile.ui.player.findActivity
@@ -147,7 +141,6 @@ import kotlinx.coroutines.withContext
 private const val ControlsAutoHideMs = 3_000L
 
 /** 双击左右半屏的快退/快进步长，与 TV 端左右键同一步长 */
-private const val SeekStepMs = 10_000L
 
 /** 进度采样间隔：与 TV 端同一份节流常量（300ms 采样、1000ms 上报一次） */
 private const val TickMs = 300L
@@ -160,9 +153,6 @@ private const val BufferingShowDelayMs = 400L
 private const val SeekHintMs = 900L
 private const val LevelHintMs = 800L
 private const val LockHintMs = 2_500L
-
-/** 截图回执（成功/失败）在屏上的存活时间：与锁屏提示同一个节奏 */
-private const val ShotHintMs = 2_500L
 
 /**
  * 「这一集以前播过」的判定阈值，与 TV 端同一个数。
@@ -200,20 +190,6 @@ private fun coreKeyOf(core: PlayerCore): String = when (core) {
 private enum class LevelKind { Brightness, Volume }
 
 /**
- * 截图要抓的那一层画面。
- *
- * 画面到底落在哪种 View 上由内核决定（IJK = 裸 SurfaceView，Exo = PlayerView 内部的
- * SurfaceView 或 TextureView），截图那一侧不该知道这件事，所以由 [VideoSurface] 创建 View 时
- * 把实例填进来，点击时再取。用普通持有对象而不是 State：它只在点击那一刻被读一次，
- * 写成 State 反而会让每次重组多一轮不可见的状态写入。
- */
-private class CaptureSource {
-    // 填/读分别发生在 View 创建（主线程）与点击（主线程），@Volatile 只为让语义显式
-    @Volatile var surfaceView: SurfaceView? = null
-    @Volatile var textureView: TextureView? = null
-}
-
-/**
  * 视频渲染面（与 TV 端 VideoSurface 同一份实现，只去掉焦点相关的属性）。
  *  · Exo：画面挂在 PlayerView 上，必须绑定具体的 ExoPlayer 实例；
  *  · IJK：画面直接渲染到 SurfaceHolder，用裸 SurfaceView + attachSurface(holder)。
@@ -223,15 +199,12 @@ private fun VideoSurface(
     engine: PlayerEngine,
     core: PlayerCore,
     resizeMode: Int,
-    capture: CaptureSource,
     modifier: Modifier = Modifier,
 ) {
     when (core) {
         PlayerCore.Ijk -> AndroidView(
             factory = { ctx ->
                 SurfaceView(ctx).apply {
-                    // 截图源：IJK 的画面就是直接画在这个 Surface 上的
-                    capture.surfaceView = this
                     holder.addCallback(object : SurfaceHolder.Callback {
                         override fun surfaceCreated(h: SurfaceHolder) {
                             engine.attachSurface(h)
@@ -260,115 +233,16 @@ private fun VideoSurface(
             update = {
                 it.player = exoPlayerOf(engine)
                 it.resizeMode = resizeMode
-                // 截图源：PlayerView 内部可能是 SurfaceView 也可能是 TextureView（surface_type），
-                // 两种都记下来——截图时按拿到的那一种走对应的拷贝方式
-                when (val view = it.videoSurfaceView) {
-                    is SurfaceView -> capture.surfaceView = view
-                    is TextureView -> capture.textureView = view
-                    else -> Unit
-                }
             },
             onRelease = {
                 // 引擎还归会话所有（退回详情页那一瞬间）就不要摘：小屏刚把同一个 ExoPlayer
                 // 绑到它自己的 PlayerView 上，这一摘会让小屏黑一帧到一秒——看起来正是"又在缓冲"
                 if (!PlaybackSession.isCurrent(engine)) it.player = null
-                capture.surfaceView = null
-                capture.textureView = null
             },
             modifier = modifier,
         )
     }
 }
-
-/**
- * 抓一帧当前画面。
- *
- * 用 PixelCopy 而不是截 Activity 全屏：PixelCopy 拷的是播放器正在渲染的那层 Surface，
- * 抓到的就是**视频帧本身**，控制层、弹幕、进度条都不会混进来。
- * 拿不到帧就返回 null 而不是抛：没有 View（还没 attach）、还没出首帧
- * （ERROR_SOURCE_NO_DATA）、安全解码输出（DRM）都是这样——调用方只要一条「没截到」的回执。
- */
-private fun captureFrame(source: CaptureSource, onResult: (Bitmap?) -> Unit) {
-    val handler = Handler(Looper.getMainLooper())
-    try {
-        val surfaceView = source.surfaceView
-        if (surfaceView != null && surfaceView.width > 0 && surfaceView.height > 0) {
-            val frame = Bitmap.createBitmap(
-                surfaceView.width,
-                surfaceView.height,
-                Bitmap.Config.ARGB_8888,
-            )
-            PixelCopy.request(
-                surfaceView,
-                frame,
-                { result ->
-                    // 回调在主线程：成功就把这张位图交出去，失败当场回收，不留垃圾
-                    if (result == PixelCopy.SUCCESS) {
-                        onResult(frame)
-                    } else {
-                        frame.recycle()
-                        onResult(null)
-                    }
-                },
-                handler,
-            )
-            return
-        }
-        // Exo 配 surface_type=texture_view 时才走这条：内容本来就在内存里，不用 PixelCopy
-        val textureView = source.textureView
-        if (textureView != null && textureView.isAvailable) {
-            onResult(textureView.bitmap)
-            return
-        }
-    } catch (t: Throwable) {
-        Log.w("PlayerScreen", "截图抓帧失败：" + t.message)
-    }
-    onResult(null)
-}
-
-/**
- * 把一帧写进系统相册的 Pictures/ModaTv。
- *
- * 只从 API 29 起调用：Q 起往自己的 MediaStore 记录里写不需要任何权限；Q 以下必须
- * 先拿 WRITE_EXTERNAL_STORAGE，而播放页明确不申请运行时权限，所以那条路不开
- * （低版本按钮置灰并给一句原因，见 PlayerScreen 里的 takeScreenshot）。
- * 返回 Boolean 而不是抛异常：截图失败不该把播放页带进错误态。
- */
-private fun saveShotToGallery(context: Context, bitmap: Bitmap): Boolean = try {
-    val resolver = context.contentResolver
-    val values = ContentValues().apply {
-        // 文件名只要求唯一，时间戳就够；不起中文名，免得各机型对文件名的清洗规则不一样
-        put(MediaStore.Images.Media.DISPLAY_NAME, "ModaTv_" + System.currentTimeMillis() + ".jpg")
-        put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-        put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/ModaTv")
-        // pending：写完才让它出现在相册里，否则用户可能读到半张图
-        put(MediaStore.Images.Media.IS_PENDING, 1)
-    }
-    val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
-    if (uri == null) {
-        false
-    } else {
-        val written = resolver.openOutputStream(uri)?.use { out ->
-            bitmap.compress(Bitmap.CompressFormat.JPEG, 95, out)
-        } == true
-        if (written) {
-            resolver.update(
-                uri,
-                ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) },
-                null,
-                null,
-            )
-        } else {
-            // 写失败就把这条空记录删掉，别在相册里留一个点不开的条目
-            resolver.delete(uri, null, null)
-        }
-        written
-    }
-} catch (t: Throwable) {
-    Log.w("PlayerScreen", "截图落库失败：" + t.message)
-    false
-}
-
 /** 双击快退/快进的居中反馈：一个方向箭头 + 累计跳转量（照搬 TV 端 SeekHint 的形态） */
 @Composable
 private fun SeekHint(accumMs: Long, modifier: Modifier = Modifier) {
@@ -508,6 +382,8 @@ fun PlayerScreen(
     episodes: List<Episode> = emptyList(),
     currentEpisodeIndex: Int = 1,
     onSelectEpisode: (Episode) -> Unit = {},
+    // 换集进行中：旧画面留在屏上，只叠一个转圈（见 MainViewModel.startPlayer 的原地换流）
+    switching: Boolean = false,
 ) {
     val context = LocalContext.current
     val activity = remember(context) { findActivity(context) }
@@ -557,13 +433,6 @@ fun PlayerScreen(
     var lockHintVisible by remember { mutableStateOf(false) }
     // 同一时刻只有一个面板（TV 端 five-boolean 互斥表的触屏等价物）
     var panel by remember { mutableStateOf<PlayerPanel?>(null) }
-
-    // —— 截图 ——
-    // 画面落在哪种 View 上由 VideoSurface 创建时填进来，点击那一刻才读
-    val captureSource = remember { CaptureSource() }
-    // 截图回执：0 = 不显示；非 0 = 要显示的文案资源键（成功 / 没截到 / 系统版本不够）
-    var shotHintRes by remember { mutableIntStateOf(0) }
-    var shotHintTick by remember { mutableIntStateOf(0) }
 
     // —— 投屏 ——
     // casting 非空 = 正在投到哪台电视；投屏期间本地引擎保持暂停
@@ -748,54 +617,6 @@ fun PlayerScreen(
         }
     }
 
-    /**
-     * 截图：抓当前视频帧并落进系统相册（Pictures/ModaTv）。
-     *
-     * 只支持 API 29+：更低的版本要先拿 WRITE_EXTERNAL_STORAGE，而播放页不做运行时权限申请。
-     * 低版本按钮仍然可点，点下去给一句原因——置灰又点不动的按钮，用户问不出为什么不给用。
-     * 失败一律落成一条回执，不进播放页的错误态（截图失败跟「这一集播不了」不是一回事）。
-     */
-    fun takeScreenshot() {
-        touchControls()
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
-            shotHintRes = R.string.m_player_shot_need_q
-            shotHintTick++
-            return
-        }
-        captureFrame(captureSource) { frame ->
-            if (frame == null) {
-                shotHintRes = R.string.m_player_shot_failed
-                shotHintTick++
-            } else {
-                // 写盘放 IO 线程：一张 1080p JPEG 在主线程压完，控制层会明显卡一下
-                scope.launch {
-                    val saved = withContext(Dispatchers.IO) { saveShotToGallery(context, frame) }
-                    frame.recycle()
-                    shotHintRes = if (saved) {
-                        R.string.m_player_shot_saved
-                    } else {
-                        R.string.m_player_shot_failed
-                    }
-                    shotHintTick++
-                }
-            }
-        }
-    }
-
-    /** 双击左右半屏的唯一出口：夹在 0..片长之间，而且只报「实际跳了多远」 */
-    fun seekBy(deltaMs: Long) {
-        val from = engine.positionMs
-        val target = (from + deltaMs)
-            .coerceAtLeast(0L)
-            .let { if (durationMs > 0) it.coerceAtMost(durationMs) else it }
-        val actual = target - from
-        if (actual == 0L) return
-        engine.seekTo(target)
-        positionMs = target
-        seekAccumMs += actual
-        seekHintTick++
-    }
-
     fun recordMark(isIntro: Boolean) {
         val now = engine.positionMs
         // 0 秒没有意义：既不能当标记跳，写进去也只是个空记录
@@ -908,6 +729,22 @@ fun PlayerScreen(
     }
 
     /**
+     * 面板关掉之后把系统栏再藏一次。
+     *
+     * 面板是**另一个窗口**（ModalBottomSheet 里面是一个 Dialog），它一拿到焦点，系统就按
+     * 那个窗口自己的设置把状态栏与导航栏显示出来——横屏时导航栏还是右侧一条竖栏，
+     * 正好压在面板右边缘（现象：选画面比例时顶上冒出时间电量、右边冒出三键栏）。
+     * 面板内部已经各自 hide 过一次（见 player/HideSystemBarsInDialogWindow），
+     * 这里负责"焦点落回本窗口之后"的那一次，否则关掉面板系统栏会一直挂着。
+     */
+    LaunchedEffect(panel, castSheetVisible, activity) {
+        if (panel != null || castSheetVisible) return@LaunchedEffect
+        val window = activity?.window ?: return@LaunchedEffect
+        WindowInsetsControllerCompat(window, window.decorView)
+            .hide(WindowInsetsCompat.Type.systemBars())
+    }
+
+    /**
      * 离开播放页必须停止投屏（用户要求）。
      *
      * onDispose 里不能挂起：组合已经被拆除、rememberCoroutineScope 也随之取消，
@@ -974,10 +811,15 @@ fun PlayerScreen(
         onEnded()
     }
 
-    DisposableEffect(engine) {
-        // 引用计数 +1：这一页正在显示它。归零后会话还有 800ms 宽限——
-        // 「播放页卸载 → 详情页小屏挂载」正是靠这段窗口不重建引擎
+    // 引用计数只跟"这一页"走，不跟 engine 走：切集 / 切清晰度 / 换内核都会换引擎实例，
+    // 屏幕上却始终有画面。挂在 engine 上的话，换流那一帧会先 detach 到 0（会话当场把
+    // 新引擎 pause 掉）再 attach 回来，观感就是"换集时画面停一下"。
+    DisposableEffect(Unit) {
         PlaybackSession.attach()
+        onDispose { PlaybackSession.detach() }
+    }
+
+    DisposableEffect(engine) {
         // 复用来的引擎（从详情页小屏过来）可能已经在播：状态先跟引擎对齐一次。
         // 不这么做的话首帧会显示成"暂停 + 缓冲中"，直到下一次回调才纠正，
         // 而这正好是用户第一眼看到的东西
@@ -1018,17 +860,20 @@ fun PlayerScreen(
         }
         engine.listener = listener
         onDispose {
-            // 退出/换内核前补一次进度，外部据此写播放记录；引擎已出错时位置可能是 0，别覆盖断点
-            val last = engine.positionMs
-            val dur = engine.durationMs
-            if (last > 0L) resumeFrom = last
-            onProgress(resumeFrom, dur)
+            // 退出/换内核前补一次进度，外部据此写播放记录；引擎已出错时位置可能是 0，别覆盖断点。
+            // 只在"这台引擎还是会话当前那台"时上报：换集 / 换档位时旧引擎已经在组合阶段被
+            // acquire 释放，position 归零，这时报上去等于拿 0 覆盖新一集的断点。
+            if (PlaybackSession.isCurrent(engine)) {
+                val last = engine.positionMs
+                val dur = engine.durationMs
+                if (last > 0L) resumeFrom = last
+                onProgress(resumeFrom, dur)
+            }
             // 只摘自己装的那一个 listener：退回详情页时小屏可能已经装上了它自己的，
             // 直接置 null 会把对方的回调抹掉（两者挂载/卸载顺序不保证）
             if (engine.listener === listener) engine.listener = null
             // 不 release：引擎归会话，退回详情页时小屏还要用它接着播。
-            // 真释放发生在最后一次 detach 之后 800ms（彻底离开那条路）
-            PlaybackSession.detach()
+            // 离开页面的 detach 在上面的 DisposableEffect(Unit) 里（它才是"这一页"的计数）
         }
     }
 
@@ -1037,6 +882,14 @@ fun PlayerScreen(
     // 换集/换流时仍要复位"已播完"这个只属于本页的状态。
     LaunchedEffect(engine, playUrl) {
         ended = false
+    }
+
+    /**
+     * 换集期间先静音：新地址还在路上，旧那一集不该继续出声。
+     * 新流到了是新引擎、自己会 start；切换失败会落错误态（见 startPlayer），不在这里续播。
+     */
+    LaunchedEffect(switching, engine) {
+        if (switching) engine.pause()
     }
 
     // 换内核 / 软硬解 / 切清晰度 / 回退 HLS / 重试都会重建引擎，新实例必须重新套上当前倍速
@@ -1159,13 +1012,6 @@ fun PlayerScreen(
         lockHintVisible = false
     }
 
-    // 截图回执：连点两次只重新计时，不会叠出两条
-    LaunchedEffect(shotHintTick) {
-        if (shotHintTick == 0) return@LaunchedEffect
-        delay(ShotHintMs)
-        shotHintRes = 0
-    }
-
     BackHandler {
         when {
             // 分层退出：先关面板（投屏面板也在这一层），再关控制层，最后才离开播放页
@@ -1203,7 +1049,6 @@ fun PlayerScreen(
                     engine = engine,
                     core = effectiveCore,
                     resizeMode = resizeMode,
-                    capture = captureSource,
                     modifier = if (fixedRatio != null) {
                         Modifier.fillMaxSize().aspectRatio(fixedRatio)
                     } else {
@@ -1246,11 +1091,12 @@ fun PlayerScreen(
                                 touchControls()
                             }
                         },
-                        onDoubleTap = { offset ->
-                            if (!locked) {
-                                // 左半屏快退、右半屏快进，步长 10 秒
-                                seekBy(if (offset.x >= size.width / 2f) SeekStepMs else -SeekStepMs)
-                            }
+                        onDoubleTap = {
+                            // 双击 = 播放/暂停（用户要求）。原先的"左半屏快退、右半屏快进 10 秒"
+                            // 一并撤掉：播放/暂停是更高频的动作，而精确跳转已经有横滑预览后
+                            // 松手 seek 那条路，两条并存只会让双击变成一个赌博。
+                            // 锁定态也能双击播放/暂停：锁只挡误触，不挡这个明确动作
+                            togglePlay()
                         },
                     )
                 }
@@ -1375,6 +1221,25 @@ fun PlayerScreen(
             BufferingIndicator(modifier = Modifier.fillMaxSize())
         }
 
+        // 4b) 换集中：与「刚进播放页」那一屏**长得一样**（PlayerRoute 的 Loading：
+        //     环 + 一句「正在准备播放」）。换集时旧画面还在，不铺这层压底就是两集的内容
+        //     叠在一起，看着像串台；页面本身并不重来（引擎在后台换）。
+        if (switching) {
+            Column(
+                Modifier.fillMaxSize().background(Color(0xCC000000)),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                CircularProgressIndicator(color = ModaColors.Accent)
+                Spacer(Modifier.height(16.dp))
+                Text(
+                    text = stringResource(R.string.core_player_preparing),
+                    style = ModaType.Body,
+                    color = ModaColors.TextDim,
+                )
+            }
+        }
+
         // 5) 双击/横滑的跳转反馈
         if (seekHintTick > 0) {
             SeekHint(accumMs = seekAccumMs, modifier = Modifier.fillMaxSize())
@@ -1385,6 +1250,35 @@ fun PlayerScreen(
             LevelIndicator(kind = kind, value = levelValue, modifier = Modifier.fillMaxSize())
         }
 
+        // 6b) 暂停中的中央播放键：双击暂停之后，"点画面中间那颗图标"就是继续播。
+        //     常驻而不是闪一下——暂停是一个持续状态，反馈也该持续；
+        //     缓冲中 / 换集中不画，那两种情况下画面本来就在等，再盖一颗键只会让人点错。
+        // 锁定态同样要出这颗键（用户要求：锁着暂停与没锁时的暂停长得一样）。
+        // 锁定只挡"单击那一层的误触"，不挡暂停这个明确状态——否则锁着暂停之后整屏没有任何
+        // "我正在暂停"的提示，看起来就像卡住了。
+        if (!playing && !buffering && !switching && playError == null) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Box(
+                    Modifier
+                        .size(64.dp)
+                        .clip(CircleShape)
+                        .background(Color(0x66000000))
+                        .clickable {
+                            togglePlay()
+                            touchControls()
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.PlayArrow,
+                        contentDescription = stringResource(R.string.m_player_play),
+                        tint = Color.White,
+                        modifier = Modifier.size(36.dp),
+                    )
+                }
+            }
+        }
+
         if (fellBackToHls) {
             Text(
                 stringResource(R.string.player_hls_fallback),
@@ -1392,25 +1286,6 @@ fun PlayerScreen(
                 color = ModaColors.TextDim,
                 modifier = Modifier.align(Alignment.TopEnd).padding(16.dp),
             )
-        }
-
-        // 截图回执：与播放页其余提示同一形态（半透明底 + 一行字），2.5 秒后自己收走。
-        // 故意不挂在控制层下面：点完截图控制层可能刚好自动收起，回执不能跟着一起消失。
-        if (shotHintRes != 0) {
-            Box(
-                Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 64.dp)
-                    .clip(RoundedCornerShape(20.dp))
-                    .background(Color(0xCC000000))
-                    .padding(horizontal = 16.dp, vertical = 10.dp),
-            ) {
-                Text(
-                    text = stringResource(shotHintRes),
-                    style = ModaType.Caption,
-                    color = ModaColors.Text,
-                )
-            }
         }
 
         // 7) 控制层：顶栏（返回 / 标题+集号 / 投屏 / 锁定）+ 底栏两行
@@ -1469,23 +1344,6 @@ fun PlayerScreen(
                 onToggleDanmaku = { toggleDanmaku() },
                 modifier = Modifier.align(Alignment.BottomCenter),
             )
-            // 画面右侧竖排（优酷同一形态）：截图贴右边缘、垂直居中偏上，与控制层同进同退。
-            // 现有锁定入口在顶栏最右，竖排按钮压不到它「上面」，所以落位按可量化的那条
-            // ——右侧竖排 + 居中偏上（padding 把整颗往上抬半个偏移量的两倍）。
-            // 以后再往这一列加按钮就排在截图上/下，仍然只占一列，不往底栏四角挂图标。
-            Box(
-                Modifier
-                    .align(Alignment.CenterEnd)
-                    .padding(end = 12.dp, bottom = 96.dp),
-            ) {
-                PlayerSideAction(
-                    imageVector = Icons.Filled.PhotoCamera,
-                    contentDescription = stringResource(R.string.m_player_screenshot),
-                    // 29 以下写相册需要运行时权限，播放页不申请：置灰，点下去给原因
-                    enabled = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q,
-                    onClick = { takeScreenshot() },
-                )
-            }
         }
 
         // 8) 投屏中的状态提示：控制层收起、且没锁屏时仍然留在右上角。
@@ -1499,24 +1357,33 @@ fun PlayerScreen(
             }
         }
 
-        // 9) 锁定时唯一可见的出口
+        // 9) 锁定时唯一可见的出口：屏幕单击之后出现在**原来那颗截图键的位置**
+        //    （右侧竖排、居中偏上，44dp 圆钮），而不是画面正中——
+        //    正中那一下会正好盖住用户在看的画面，左侧那颗又贴着返回的位置容易误触。
         if (locked && lockHintVisible) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .padding(end = 12.dp, bottom = 96.dp),
+                contentAlignment = Alignment.CenterEnd,
+            ) {
                 Box(
                     Modifier
+                        .size(44.dp)
                         .clip(CircleShape)
-                        .background(Color(0xB3000000))
+                        .background(Color(0x66000000))
                         .clickable {
                             locked = false
                             lockHintVisible = false
                             touchControls()
-                        }
-                        .padding(20.dp),
+                        },
+                    contentAlignment = Alignment.Center,
                 ) {
                     Icon(
                         imageVector = Icons.Filled.LockOpen,
-                        contentDescription = null,
+                        contentDescription = stringResource(R.string.m_player_unlock),
                         tint = Color.White,
+                        modifier = Modifier.size(24.dp),
                     )
                 }
             }
@@ -1584,7 +1451,12 @@ fun PlayerScreen(
 
             PlayerPanel.Aspect -> AspectSheet(
                 mode = settings.aspectMode,
-                onPick = { mode -> updateSettings(settings.copy(aspectMode = mode)) },
+                // 选完即生效并收面板：比例是"看一眼就定"的一项，留着面板挡着画面，
+                // 用户还得自己点关闭才能看见改完的效果
+                onPick = { mode ->
+                    updateSettings(settings.copy(aspectMode = mode))
+                    panel = null
+                },
                 onClose = { panel = null },
             )
 

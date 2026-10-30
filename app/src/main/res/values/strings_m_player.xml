@@ -26,9 +26,7 @@
          那里本来就是整页播放，「退出全屏」没有目标可去 -->
     <string name="m_player_exit_fullscreen">退出全屏</string>
 
-    <!-- 画面右侧竖排的截图按钮与它的三条回执 -->
-    <string name="m_player_screenshot">截图</string>
-    <string name="m_player_shot_saved">截图已保存到相册</string>
-    <string name="m_player_shot_failed">没截到画面，等画面出来后再试</string>
-    <string name="m_player_shot_need_q">截图需要 Android 10 及以上系统</string>
+    <!-- 暂停时画面中央那颗播放键 / 锁定态点屏幕后右侧那颗解锁键的无障碍文案 -->
+    <string name="m_player_play">播放</string>
+    <string name="m_player_unlock">解锁</string>
 </resources>
