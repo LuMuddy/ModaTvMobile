@@ -19,11 +19,13 @@ fun secret(key: String): String = localSecrets.getProperty(key).orEmpty()
 // 发版时由 CI 从 git tag 推导，用 -Pmoda.versionName / -Pmoda.versionCode 覆盖。
 // 先算成变量：产物文件名（ModaMobile<版本>.apk）也要拿版本名，只写在 defaultConfig 里就取不到了。
 //
-// 本地不带 -P 时就是首版常量 1 / 1.0.0，不做 TV 端那种「从 tag 推导 +1」：
-// 手机端的发版号一律由 CI 按 tag 序号生成（v1.0.0 → 1），本地包只是开发自测，
-// 让它去猜线上号既猜不准也会和 CI 算出两套值，对不上时就是一次装不上的版本。
-val appVersionName = (project.findProperty("moda.versionName") as String?) ?: "1.0.0"
-val appVersionCode = (project.findProperty("moda.versionCode") as String?)?.toIntOrNull() ?: 1
+// 本地不带 -P 时就是当前发版常量 2 / 1.0.1，与 v1.0.1 那次 CI 按 tag 序号算出的号一致；
+// 不做 TV 端那种「从 tag 推导 +1」：手机端的发版号一律由 CI 按 tag 序号生成
+// （v1.0.0 → 1、v1.0.1 → 2），本地包只是开发自测，让它去猜线上号既猜不准，也会和
+// CI 算出两套值，对不上时就是一次装不上的版本。
+// 每发一版这两个默认值都要跟着挪：漏挪的话本地包版本号比线上旧，覆盖安装会被系统拒掉。
+val appVersionName = (project.findProperty("moda.versionName") as String?) ?: "1.0.1"
+val appVersionCode = (project.findProperty("moda.versionCode") as String?)?.toIntOrNull() ?: 2
 
 android {
     namespace = "com.moda.mobile"
@@ -35,7 +37,7 @@ android {
         // 在 24 以下要么多打 multidex 补丁要么掉 API，24 是这套依赖能干净编译的最低点。
         minSdk = 24
         targetSdk = 34
-        // 首版就是 1 / 1.0.0，与 TV 端的 major*10000+minor*100+patch 编码**不同**：
+        // 当前的 2 / 1.0.1，与 TV 端的 major*10000+minor*100+patch 编码**不同**：
         // 手机端的号由 .github/workflows/android-release.yml 按 tag 在版本序里的位置复算
         // （v1.0.0 → 1、v1.0.1 → 2），改这里的常量不会影响线上包，改 CI 的推导才影响。
         // versionCode 必须随每次发版严格递增，否则装着线上包的设备会拒绝安装（降级）。
