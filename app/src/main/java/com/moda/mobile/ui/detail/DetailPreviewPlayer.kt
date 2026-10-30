@@ -255,9 +255,8 @@ fun DetailPreviewPlayer(
     onEnsureDanmaku: (String, Long) -> Unit = { _, _ -> },
 
     /**
-     * 这一页在看的剧 cid：弹幕开关除了写全局设置，还要把「本剧覆盖」写成同一个值。
-     * 根播放页读的是 override.danmakuEnabled ?: settings.danmakuEnabled，只写前者的话，
-     * 用户在这部剧的播放页里单独调过弹幕后，这里关掉、进大屏仍然是开的。
+     * 这一页在看的剧 cid：弹幕开关按它读写「本剧覆盖」（与根播放页同一个 DataStore 键）。
+     * 空串 = 拿不到剧身份，此时开关只改这一格的本地状态，不落盘。
      */
     cid: String = "",
     /**
@@ -323,6 +322,19 @@ fun DetailPreviewPlayer(
     LaunchedEffect(settingsStore) {
         settings = settingsStore.current()
     }
+    /**
+     * 本剧覆盖里只关心弹幕那一格。
+     *
+     * 大屏读的是 `override.danmakuEnabled ?: settings.danmakuEnabled`，小屏原来只读全局，
+     * 于是「大屏里关掉这部剧的弹幕 → 退回来点开小屏」又是开的：同一部剧在两个屏幕上两个状态。
+     * 两处必须同一口径。
+     */
+    var danmakuOverride by remember(cid) { mutableStateOf(PlaybackOverride()) }
+    LaunchedEffect(cid, overrideStore) {
+        danmakuOverride = if (cid.isBlank()) PlaybackOverride() else overrideStore.get(cid)
+    }
+    /** 这一格真正生效的弹幕开关：本剧覆盖优先，没有覆盖才回落设置页里的默认值 */
+    val danmakuEnabled = danmakuOverride.danmakuEnabled ?: settings.danmakuEnabled
 
     // —— 进度 ——
     // 位置/时长只能轮询（PlayerEngine 只有 getter、没有进度回调），500ms 一次够拖动条用
@@ -438,36 +450,29 @@ fun DetailPreviewPlayer(
     }
 
     /**
-     * 弹幕总开关的唯一落点：与全屏播放页读写的**同一个** [PlayerSettings]，
-     * 所以关掉之后进全屏也是关的。
+     * 弹幕总开关的唯一落点：写的是**本剧覆盖**，不写 [PlayerSettings]。
      *
-     * 乐观更新（先改本地渲染、再落盘）：这一格是"顺手看一眼"的位置，为一次写盘把图标卡住不值得；
-     * 写失败最多是下次进来回到旧值，与设置页那几处同一条约定。
+     * `settings.danmakuEnabled` 是「设置 → 播放设置 → 弹幕」那一项，是默认值：
+     * 播放页里的一次临时切换不许改写它，否则用户在设置里看到的"默认"会被一次播放悄悄改掉
+     * （与 core / decoder 同一条约定：默认值与单剧覆盖两处不要混用）。
+     *
+     * 口径与全屏播放页 PlayerScreen.toggleDanmaku 完全一致：和全局默认相同就存 null（删键），
+     * 所以"小屏切的"与"大屏切的"是同一格覆盖，进哪个屏幕都是同一个状态。
+     *
+     * 乐观更新（先改本地渲染、再落盘）：这一格是"顺手看一眼"的位置，为一次写盘把图标卡住不值得。
      */
     fun toggleDanmaku() {
-        val next = settings.copy(danmakuEnabled = !settings.danmakuEnabled)
-        settings = next
+        val stored = (!danmakuEnabled).takeIf { it != settings.danmakuEnabled }
+        danmakuOverride = danmakuOverride.copy(danmakuEnabled = stored)
+        if (cid.isBlank()) return
         scope.launch {
             try {
-                settingsStore.save(next)
+                // 先 read 再 copy：core / decoder 那两项是播放页的，不许在这里被整条覆盖清掉
+                overrideStore.save(cid, overrideStore.get(cid).copy(danmakuEnabled = stored))
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                // 静默：开关没记住不影响播放
-            }
-            // 再把这一部的「本剧覆盖」写成同一个值。根播放页取的是
-            // override.danmakuEnabled ?: settings.danmakuEnabled，而覆盖是每部剧一条、
-            // 用户在播放页里单独调过就钉住了——只写 settings 的话，从这里关掉、
-            // 进大屏看同一部剧仍然是开的（"小屏关了、大屏还开着"）。
-            // 先 read 再 copy：core / decoder 那两项是播放页的，不许在这里被整条覆盖清掉。
-            if (cid.isNotBlank()) {
-                try {
-                    overrideStore.save(cid, overrideStore.get(cid).copy(danmakuEnabled = next.danmakuEnabled))
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    // 静默：覆盖没写进去最多是"大屏沿用旧值"，不影响这一格
-                }
+                // 静默：覆盖没写进去最多是"下次进来回到默认"，不影响这一格
             }
         }
     }
@@ -846,7 +851,7 @@ fun DetailPreviewPlayer(
                 fullscreen -> ControlsBottomInset
                 else -> PreviewControlsBottomInset
             },
-            enabled = settings.danmakuEnabled,
+            enabled = danmakuEnabled,
             fontSizeSp = settings.danmakuSizeSp,
             topRatio = settings.topRatio,
             bottomRatio = settings.bottomRatio,
@@ -996,11 +1001,11 @@ fun DetailPreviewPlayer(
                         description = stringResource(R.string.player_speed),
                         onClick = { speedSheetVisible = true },
                     )
-                    // 弹幕开关：切的是全 App 那一个总开关（PlayerSettingsStore.danmakuEnabled），
-                    // 与全屏播放页底栏那颗、播放页「更多 → 弹幕」里的开关同一个落点。
-                    // 小屏自己不存第二份状态——那正是"小屏关了、全屏还开着"的来源。
+                    // 弹幕开关：切的是本剧覆盖，设置页里那一项是默认值、不被这里改写。
+                    // 初始状态 = 覆盖 ?: 默认值，与大屏播放页读同一份，
+                    // 所以进去是开的还是关的，两个屏幕永远一致（见上面 danmakuEnabled）。
                     CornerIcon(
-                        icon = if (settings.danmakuEnabled) {
+                        icon = if (danmakuEnabled) {
                             Icons.Filled.Subtitles
                         } else {
                             Icons.Outlined.SubtitlesOff
@@ -1175,9 +1180,9 @@ fun DetailPreviewPlayer(
                             panel = next
                         }
                     },
-                    // 弹幕开关与上面那格小屏是**同一个**总开关（PlayerSettingsStore.danmakuEnabled），
-                    // 也是同一个窗口：全屏后引擎与这一集的 vid 都没变，弹幕照旧飘
-                    danmakuEnabled = settings.danmakuEnabled,
+                    // 弹幕开关与上面那格小屏是**同一个**本剧覆盖，也是同一个窗口：
+                    // 全屏后引擎与这一集的 vid 都没变，弹幕照旧飘
+                    danmakuEnabled = danmakuEnabled,
                     onToggleDanmaku = {
                         toggleDanmaku()
                         touchControls()

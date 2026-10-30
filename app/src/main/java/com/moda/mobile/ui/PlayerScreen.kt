@@ -1571,7 +1571,11 @@ fun PlayerScreen(
             )
 
             PlayerPanel.Danmaku -> DanmakuSheet(
-                settings = settings.copy(danmakuEnabled = effectiveDanmakuEnabled),
+                // 传**全局** settings（字号/区域/边距那四项写回的是它），开关的显示值单独走 enabled：
+                // 面板里改字号时，写回的 settings 不能带着本剧的弹幕覆盖值，否则一次调字号
+                // 就把「设置 → 播放设置 → 弹幕」的默认值改成了当前这一剧的状态
+                settings = settings,
+                enabled = effectiveDanmakuEnabled,
                 // 总开关只有一个落点（toggleDanmaku）：进度条行尾的快捷开关与这里改的是同一件事
                 onToggleEnabled = { toggleDanmaku() },
                 onSettingsChange = { next -> updateSettings(next) },

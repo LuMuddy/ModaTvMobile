@@ -40,6 +40,15 @@ import com.moda.mobile.ui.theme.ModaType
 @Composable
 fun DanmakuSheet(
     settings: PlayerSettings,
+    /**
+     * 当前**生效**的开关值：本剧覆盖优先，没有覆盖才等于 [settings].danmakuEnabled。
+     *
+     * 不能拿 [settings] 自己显示：用户在本剧关过弹幕后，全局默认仍是开的，
+     * 照 settings 画开关会出现「面板里是开、画面上没有弹幕」。
+     * 反过来，写回时也绝不能把这个生效值写进 settings —— 那是默认值，
+     * 一次播放页的临时切换不该改掉它。
+     */
+    enabled: Boolean,
     onToggleEnabled: () -> Unit,
     onSettingsChange: (PlayerSettings) -> Unit,
     onClose: () -> Unit,
@@ -47,7 +56,7 @@ fun DanmakuSheet(
     PlayerSheet(title = stringResource(R.string.player_danmaku_title), onClose = onClose) {
         SheetSwitchRow(
             label = stringResource(R.string.player_danmaku_enabled),
-            checked = settings.danmakuEnabled,
+            checked = enabled,
             onCheckedChange = { onToggleEnabled() },
         )
         Spacer(Modifier.height(8.dp))
