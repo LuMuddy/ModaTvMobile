@@ -159,7 +159,6 @@ fun DetailScreen(
     loading: Boolean,
     /** 数据层错误码：文案一律由 [appErrorText] 按当前语言渲染 */
     error: AppError?,
-    onPlay: (Episode) -> Unit,
     onTierSelect: (Tier) -> Unit,
     selectedTier: Tier?,
     onBack: () -> Unit,
@@ -239,7 +238,8 @@ fun DetailScreen(
      * 顶部小屏在播第几集：**只认 VM 装好的那一集**，与选集高亮 [currentIndex] 刻意分开。
      *
      * 两个状态描述的是两件事：高亮 = "我最后点了哪一集"（点完就进全屏了），
-     * 小屏 = "这一页现在在放哪一集"。用户明确要求点集号不切小屏，所以两者本来就可能不同。
+     * 小屏 = "这一页现在在放哪一集"。用户要求点集号就**在本页换片源**（不跳页面），
+     * 所以两者在点完之后是同一个值；分开存只是因为 preview 还要等 VM 把地址装回来。
      * address 还没到时先按续播集显示，标题行才不至于写"第 1 集"再跳一次。
      */
     val previewIndex = preview?.episodeIndex ?: resumeIndex.coerceAtLeast(0)
@@ -333,7 +333,19 @@ fun DetailScreen(
                 // 高亮与"用户接管"都推迟到这一刻：点一下又取消不该把选集高亮挪过去
                 userTouched = true
                 currentIndex = action.index
-                onPlay(action.episode)
+                // 选一集 = **在这一页换片源，不换页面**。页面是不是全屏由当前状态决定：
+                // 全屏里换集就一直全屏，小屏里换就一直小屏。
+                // 以前这里 push 播放页路由，于是"在详情页点下面的集号"会直接跳进横屏全屏——
+                // 用户点的是这一页的选集，落进的却是另一个页面，返回路上全屏状态也一并丢了。
+                previewRequested = true
+                loadPreviewNow(action.index)
+                if (!fullscreen) {
+                    // 小屏那一格在页面顶上：点完把页面拉回顶部（只动滚动，不动路由），
+                    // 否则用户点完看到的还是选集列表，不知道已经在放了
+                    pageScope.launch {
+                        if (pageState.layoutInfo.totalItemsCount > 0) pageState.animateScrollToItem(0)
+                    }
+                }
             }
         }
     }
@@ -603,7 +615,8 @@ fun DetailScreen(
                 if (detail == null) onRetry?.invoke() ?: onBack() else loadPreviewNow(previewIndex)
             },
             // 全屏按钮 = 只改布局。以前这里 push 播放页路由（→ 新 Surface → 黑帧），
-            // 现在留在本页换一颗 Modifier；播放页路由只留给选集里"去大屏看这一集"
+            // 现在留在本页换一颗 Modifier。选集点集号同样是本页换片源（不跳播放页路由），
+            // 于是"页面是不是全屏"只由当前状态决定，不会再被一次跳转重置
             onEnterFullscreen = { fullscreen = true },
             onExitFullscreen = { fullscreen = false },
             fullscreen = fullscreen,

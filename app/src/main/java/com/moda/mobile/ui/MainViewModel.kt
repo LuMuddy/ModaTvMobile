@@ -121,6 +121,13 @@ sealed interface PlayerUi {
         val startPositionMs: Long,
         // 选集浮层用的集数表；默认空表，不影响其它构造点
         val episodes: List<Episode> = emptyList(),
+        /**
+         * 「正在换集」：旧画面还挂在屏幕上，新地址还没到手。
+         *
+         * 为什么不加第四个状态（Loading / Error / Ready 之外的 Switching）：换状态就得整页换掉
+         * 子树，而换集要的恰恰是"页面别动、只换内容"——整页换掉会把横屏一起换掉（见 startPlayer）。
+         */
+        val switching: Boolean = false,
     ) : PlayerUi
 }
 
@@ -1825,7 +1832,14 @@ class MainViewModel(private val app: Context) : ViewModel() {
         playerJob?.cancel()
         // 换集/重进先清空弹幕：上一集的窗口既不该显示，也不该被复用
         resetDanmakuWindow()
-        player = PlayerUi.Loading
+        // 栈顶仍然是播放页 = 切集 / 下一集 / 连播：**原地换流**，不把整页打回 Loading。
+        // 为什么：PlayerRoute 的 Loading 分支会把 PlayerScreen 整个卸掉，而横屏那条
+        // DisposableEffect 挂在它身上——一卸载就把方向还原成 UNSPECIFIED（竖屏），等新的
+        // Ready 到了再申请横屏，用户看到的就是"竖屏闪一下再横屏"，引擎也跟着重建一次。
+        // 现在旧画面留着、只叠一个"切换中"，新地址一到就地换流（同 changeTier 的写法）。
+        val inPlace = (player as? PlayerUi.Ready)
+            ?.takeIf { stack.lastOrNull() is Dest.Player }
+        player = inPlace?.copy(switching = true) ?: PlayerUi.Loading
         lastPosMs = 0L
         lastDurMs = 0L
         lastWriteAt = 0L
@@ -1850,6 +1864,8 @@ class MainViewModel(private val app: Context) : ViewModel() {
                 val tier = Repo.pickBestTier(info.tiers)
                 if (tier == null) {
                     Log.w("MainViewModel", "没有可用的清晰度，无法播放：${dest.vid}")
+                    // 切集失败照样落错误态（VIP / 预告就是这样）：这一屏必须给出重试入口，
+                    // 静默把上一集留着等于把"点了没反应"留给用户
                     player = PlayerUi.Error(AppError.NoVideo)
                     return@launch
                 }

@@ -166,8 +166,10 @@ private const val ControlsAutoHideMs = 3000L
 /** 双击窗口：两次抬手落在这个窗口内就算双击（与系统的 300ms 同一量级） */
 private const val DoubleTapMs = 300L
 
+/** 锁定态点屏幕后，那颗解锁键在屏上的存活时间（与大屏同一个节奏） */
+private const val LockHintMs = 2_500L
+
 /** 双击后中央那个大图标停留多久：够看清"刚才是暂停还是继续"，又不至于挡画面 */
-private const val CenterPulseMs = 700L
 
 
 /** 纵滑调的是亮度还是音量（判定用手势起点 x，见手势层注释） */
@@ -231,7 +233,7 @@ fun DetailPreviewPlayer(
     onExitFullscreen: () -> Unit = {},
     /** 全屏是页面布局状态，由详情页持有；播放器只按它切换自己那颗 Modifier */
     fullscreen: Boolean = false,
-    /** 全屏「选集」面板的数据源；点一集仍然走页面既有的出口（去播放页看这一集） */
+    /** 全屏「选集」面板的数据源；点一集仍然走页面既有的出口（本页换片源，保持全屏） */
     episodes: List<Episode> = emptyList(),
     onSelectEpisode: (Episode) -> Unit = {},
     /**
@@ -298,6 +300,8 @@ fun DetailPreviewPlayer(
 
     var attempt by remember(primaryUrl) { mutableIntStateOf(0) }
     var playing by remember { mutableStateOf(false) }
+    /** 这一格有没有真的播过：没有它，刚挂载那一下（playing 还是初值 false）就会顶出中央播放键 */
+    var hasPlayed by remember { mutableStateOf(false) }
     var buffering by remember { mutableStateOf(false) }
     var playError by remember(primaryUrl, attempt) { mutableStateOf<PlayerError?>(null) }
     var speed by remember { mutableFloatStateOf(1f) }
@@ -380,6 +384,9 @@ fun DetailPreviewPlayer(
     // 全屏只是**换布局**：这一段状态里没有任何 release / acquire / start，
     // 引擎与它的 Surface 全程不动（换源才该重建，换屏幕不该）。
     var locked by remember { mutableStateOf(false) }
+    // 锁定态点屏幕后那颗解锁键：2.5 秒后自己收（与大屏同一条节奏）
+    var lockHintTick by remember { mutableIntStateOf(0) }
+    var lockHintVisible by remember { mutableStateOf(false) }
     // 一次只开一张底部面板（null = 都没有）
     var panel by remember { mutableStateOf<PlayerPanel?>(null) }
     // 画面比例：这颗播放器自己的显示参数，不落盘（本页没有 settings），退出页面即回到 Fit
@@ -389,9 +396,7 @@ fun DetailPreviewPlayer(
     // 记"上一次抬手的时刻"与那个待决的单击任务：双击窗口内再点一下就取消掉它
     var lastTapAt by remember { mutableLongStateOf(0L) }
     var tapJob by remember { mutableStateOf<Job?>(null) }
-    /** 双击后中央亮一下的图标；null = 不显示 */
-    var pulseIcon by remember { mutableStateOf<ImageVector?>(null) }
-    var centerPulse by remember { mutableIntStateOf(0) }
+
 
     // —— 纵滑（亮度/音量）——
     var brightness by remember { mutableFloatStateOf(0.5f) }
@@ -407,8 +412,6 @@ fun DetailPreviewPlayer(
     // 手势回调活在 pointerInput 的协程里，读局部委托状态拿到的是最新值；
     // 但跨重组的"最新参数"仍要经 rememberUpdatedState，否则回调会用到旧回调/旧地址
     val brightnessNow by rememberUpdatedState(brightness)
-    // 双击要在手势协程里判断"现在是播还是停"：直接读 playing 会停在组合时那一帧
-    val playingNow by rememberUpdatedState(playing)
     val volumeNow by rememberUpdatedState(volume)
     val preferHlsNow by rememberUpdatedState(preferHls)
     val hlsNow by rememberUpdatedState(hlsUrl)
@@ -437,6 +440,7 @@ fun DetailPreviewPlayer(
     // 参数名与 PlayerEngine.Listener 保持一致会遮住同名状态，所以统一经这几个函数落回状态。
     fun setPlayingState(value: Boolean) {
         playing = value
+        if (value) hasPlayed = true
     }
 
     fun setBufferingState(value: Boolean) {
@@ -493,11 +497,17 @@ fun DetailPreviewPlayer(
         }
     }
 
+    // 引用计数只跟"这一格"走，不跟 engine 走：换集 / 切清晰度都会换引擎实例，画面上却始终
+    // 有内容。挂在 engine 上的话，换流那一帧的顺序是「acquire 建新引擎 → 旧 effect dispose
+    // detach 到 0 → 会话 scheduleRelease 把**新**引擎 pause 掉」；那一刻新引擎还没报 isPlaying，
+    // 于是宽限期结束也不会续播——表现就是"选了新的一集，画面停在那儿要手动点播放"（踩过）。
+    DisposableEffect(Unit) {
+        PlaybackSession.attach()
+        onDispose { PlaybackSession.detach() }
+    }
+
     DisposableEffect(engine) {
         val e = engine ?: return@DisposableEffect onDispose { }
-        // 引用计数 +1：现在这一格在显示它。归零不代表立刻释放——会话留 800ms 宽限，
-        // 正好覆盖「详情页卸载 → 播放页挂载」这段交替
-        PlaybackSession.attach()
         // 复用来的引擎可能已经在播（从播放页返回）：状态先跟引擎对齐一次，
         // 否则底行那颗按钮会一直显示成"播放中"的反面，直到下一次回调才纠正
         setPlayingState(e.isPlaying)
@@ -528,9 +538,8 @@ fun DetailPreviewPlayer(
             // 只摘自己装的那一个 listener：切换时播放页可能已经把它自己的装上了，
             // 直接置 null 会把对方的回调抹掉（两者挂载/卸载顺序不保证）
             if (e.listener === listener) e.listener = null
-            // 不 release：引擎归会话，切到播放页时它还要接着播。
-            // 真释放发生在最后一次 detach 之后 800ms（回首页那条路）
-            PlaybackSession.detach()
+            // 不 release、也不 detach：引擎归会话，切到播放页时它还要接着播；
+            // 离开这一格的 detach 在上面那个 DisposableEffect(Unit) 里
         }
     }
 
@@ -584,12 +593,15 @@ fun DetailPreviewPlayer(
         levelKind = null
     }
 
-    // 双击后的中央图标：连按两次只重新计时，不会叠出两个图标
-    LaunchedEffect(centerPulse) {
-        if (centerPulse == 0) return@LaunchedEffect
-        delay(CenterPulseMs)
-        pulseIcon = null
+    // 锁定时单击整屏：给一个可见的解锁出口，2.5 秒后自己收
+    LaunchedEffect(lockHintTick) {
+        if (lockHintTick == 0) return@LaunchedEffect
+        lockHintVisible = true
+        delay(LockHintMs)
+        lockHintVisible = false
     }
+
+
 
     // 控制层 3 秒无操作自动收起。面板开着时不收：那会儿用户在看面板，
     // 收起只会让关掉面板后这一格变成"什么都没有"。
@@ -607,7 +619,9 @@ fun DetailPreviewPlayer(
             castSheetVisible -> castSheetVisible = false
             panel != null -> panel = null
             locked -> locked = false
-            controlsVisible -> controlsVisible = false
+            // 控制层展开时**不再先收它**：用户要求"全屏第一下返回就回到小屏"。
+            // 进全屏默认是展开控制层的（见下面的 LaunchedEffect(fullscreen)），多一档
+            // "先收控制层"会让返回按三次才退得出去，手感就是"返回键没反应"。
             else -> onExitFullscreen()
         }
     }
@@ -669,6 +683,18 @@ fun DetailPreviewPlayer(
             locked = false
             panel = null
         }
+    }
+
+    // 面板是独立窗口（ModalBottomSheet 里面是一个 Dialog）：它一拿焦点，系统就按那个窗口的
+    // 默认设置把状态栏与导航栏放回来。面板内部各自 hide 过一次（PlayerSheet 里的
+    // HideSystemBarsInDialogWindow），这里补"焦点落回本窗口之后"的那一次——
+    // 否则从面板回来，全屏里会一直挂着系统栏（与大屏 PlayerScreen 同一条口径）。
+    LaunchedEffect(panel, castSheetVisible, speedSheetVisible, fullscreen) {
+        if (!fullscreen) return@LaunchedEffect
+        if (panel != null || castSheetVisible || speedSheetVisible) return@LaunchedEffect
+        val window = activity?.window ?: return@LaunchedEffect
+        WindowInsetsControllerCompat(window, window.decorView)
+            .hide(WindowInsetsCompat.Type.systemBars())
     }
 
     // 进度轮询：拖动期间不覆盖预览值，其余时间跟随引擎（PlayerEngine 只有 getter）
@@ -931,22 +957,26 @@ fun DetailPreviewPlayer(
                             } else if (lifted) {
                                 val now = SystemClock.uptimeMillis()
                                 if (now - lastTapAt <= DoubleTapMs) {
-                                    // 双击 = 播放/暂停，并在画面中央亮一下对应的大图标：
-                                    // 播放中双击 → 暂停（中间出现暂停图标），再双击 → 继续播放
+                                    // 双击 = 播放/暂停。暂停后画面中央留一颗播放键（见下面那一层），
+                                    // 所以这里不再需要"亮一下就消失"的图标。
+                                    // 锁定态也照样能双击播放/暂停（用户要求：锁只挡误触，
+                                    // 不挡"我就要暂停一下"这个明确动作）
                                     lastTapAt = 0L
                                     tapJob?.cancel()
-                                    val nowPlaying = !playingNow
-                                    if (nowPlaying) engine?.play() else engine?.pause()
-                                    pulseIcon = if (nowPlaying) Icons.Filled.PlayArrow else Icons.Filled.Pause
-                                    centerPulse++
+                                    togglePlay()
                                 } else {
-                                    // 单击 = 控制层显隐**取反**。但得先等一个双击窗口：
-                                    // 不等的话每次双击都会先闪一下控制层
+                                    // 单击：先看锁没锁。锁着就给解锁入口（整屏只有它），
+                                    // 没锁才做控制层显隐**取反**。
+                                    // 未上锁这条路得先等一个双击窗口，不等的话每次双击都会先闪一下控制层
                                     lastTapAt = now
                                     tapJob?.cancel()
-                                    tapJob = scope.launch {
-                                        delay(DoubleTapMs)
-                                        if (controlsVisible) controlsVisible = false else touchControls()
+                                    if (locked) {
+                                        lockHintTick++
+                                    } else {
+                                        tapJob = scope.launch {
+                                            delay(DoubleTapMs)
+                                            if (controlsVisible) controlsVisible = false else touchControls()
+                                        }
                                     }
                                 }
                             }
@@ -1011,7 +1041,7 @@ fun DetailPreviewPlayer(
                             Icons.Outlined.SubtitlesOff
                         },
                         description = stringResource(R.string.player_danmaku_enabled),
-                        tint = if (settings.danmakuEnabled) Color.White else Color.White.copy(alpha = 0.55f),
+                        tint = if (danmakuEnabled) Color.White else Color.White.copy(alpha = 0.55f),
                         onClick = {
                             toggleDanmaku()
                             touchControls()
@@ -1140,7 +1170,11 @@ fun DetailPreviewPlayer(
                     castDeviceName = casting?.friendlyName,
                     // 顶栏那颗返回 = 退出全屏（不是退出页面）：与系统返回键的分层一致
                     onBack = onExitFullscreen,
-                    onToggleLock = { locked = true },
+                    // 锁上就顺手把控制层收掉：锁定的意义就是"别再让我误触"
+                    onToggleLock = {
+                        locked = true
+                        controlsVisible = false
+                    },
                     onCastClick = {
                         castFailure = false
                         castSheetVisible = true
@@ -1163,7 +1197,7 @@ fun DetailPreviewPlayer(
                     },
                     // 下一集**恒置灰**：换集 = 换地址 = 换源，而换源必然重建引擎，
                     // 本轮明令"引擎与 Surface 都不许动"，所以这颗按钮在这里不承担切集
-                    // （切集的正路是选集轨道 / 选集面板 → 去播放页）
+                    // （切集的正路是选集轨道 / 选集面板 → 本页换片源）
                     onNextEpisode = {},
                     nextEpisodeEnabled = false,
                     // 拖动预览由 PlayerBottomBar 自己画（它内部有 dragging 状态），这里只重置收起计时
@@ -1199,33 +1233,9 @@ fun DetailPreviewPlayer(
                     onExitFullscreen = onExitFullscreen,
                     modifier = Modifier.align(Alignment.BottomCenter).zIndex(2f),
                 )
-            } else {
-                // 锁定态：整屏只留这一个出口，绝不弹整个控制层。
-                // 位置/尺寸按用户指定：**左边中间**、距左 20dp、图标与顶栏那颗锁一样大（24dp），
-                // 不带圆底——锁屏时画面上不该再多一块色斑。触控区仍是 44dp（图标缩小不影响命中）。
-                Box(
-                    Modifier.fillMaxSize().padding(start = 20.dp),
-                    contentAlignment = Alignment.CenterStart,
-                ) {
-                    Box(
-                        Modifier
-                            .size(44.dp)
-                            .clip(CircleShape)
-                            .clickable {
-                                locked = false
-                                touchControls()
-                            },
-                        contentAlignment = Alignment.Center,
-                    ) {
-                        Icon(
-                            imageVector = Icons.Filled.LockOpen,
-                            contentDescription = null,
-                            tint = Color.White,
-                            modifier = Modifier.size(24.dp),
-                        )
-                    }
-                }
             }
+            // 锁定态不再在这里常驻一颗"左中"的解锁键：解锁入口统一是
+            // "点屏幕 → 右侧中部出现 2.5 秒"（见下面 6c），与根播放页同一个位置感
 
             // 底部面板：一次只开一个。ModalBottomSheet 挂在窗口上，天然盖住手势层与控制层。
             // 只摆这一页**真的能生效**的那几张：弹幕 / 内核 / 解码 / 片头片尾的数据与生效路径
@@ -1294,8 +1304,23 @@ fun DetailPreviewPlayer(
             }
         }
 
-        // 6) 缓冲指示：首帧还没出来时给一个细环，免得这一格看起来就是坏了
-        if (interactive && buffering && !playing) {
+        // 6) 换集加载：**与刚进详情页那一屏长得一模一样**（同一个 PreviewPlaceholder：
+        //    22dp 环 + 同一句「正在准备播放」），并且铺一层压底——换集时旧那一集还在播，
+        //    不盖住的话两集的画面与提示会叠在一起，看起来像串台。
+        //    engine == null 那一档由上面的分支自己画，这里只管"换集"这一种。
+        if (interactive && engine != null && loading) {
+            PreviewPlaceholder(
+                message = stringResource(R.string.core_player_preparing),
+                onRetry = null,
+                showSpinner = true,
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(Color(0xCC000000)),
+            )
+        }
+
+        // 6a) 普通缓冲：首帧没出来 / 网络抖动，一颗细环就够（不带文案，免得每抖一下都跳字）
+        if (interactive && engine != null && !loading && buffering && !playing) {
             CircularProgressIndicator(
                 modifier = Modifier.align(Alignment.Center).size(22.dp),
                 color = Color.White.copy(alpha = 0.9f),
@@ -1303,22 +1328,56 @@ fun DetailPreviewPlayer(
             )
         }
 
-        // 6b) 双击的中央图标：播放中双击 → 暂停（暂停图标），再双击 → 继续（播放图标）。
-        //     纯视觉、不带 clickable，不参与命中，控制层与手势层照旧各管各的
-        pulseIcon?.let { icon ->
+        // 6b) 暂停中的中央播放键：小屏与页内全屏共用这一颗。
+        //     双击暂停之后它就是"继续播"的落点；常驻而不是闪一下，因为暂停是持续状态。
+        // 锁定态同样要出这颗键：锁只挡误触，不挡"我在暂停"这个状态（与大屏一致）
+        if (interactive && hasPlayed && !playing && !buffering && !loading) {
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                 Box(
                     Modifier
-                        .size(72.dp)
+                        .size(56.dp)
                         .clip(CircleShape)
-                        .background(Color(0x66000000)),
+                        .background(Color(0x66000000))
+                        .clickable { togglePlay() },
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
-                        imageVector = icon,
-                        contentDescription = null,
+                        imageVector = Icons.Filled.PlayArrow,
+                        contentDescription = stringResource(R.string.m_player_play),
                         tint = Color.White,
-                        modifier = Modifier.size(40.dp),
+                        modifier = Modifier.size(32.dp),
+                    )
+                }
+            }
+        }
+
+        // 6c) 锁定时唯一的出口：点屏幕后在右侧中部出现一颗解锁键，2.5 秒后自己收。
+        //     小屏这一格锁上之后如果没有它，就只剩"按系统返回键"能解开（踩过）。
+        if (interactive && locked && lockHintVisible) {
+            Box(
+                Modifier
+                    .fillMaxSize()
+                    .padding(end = 12.dp)
+                    .zIndex(3f),
+                contentAlignment = Alignment.CenterEnd,
+            ) {
+                Box(
+                    Modifier
+                        .size(44.dp)
+                        .clip(CircleShape)
+                        .background(Color(0x66000000))
+                        .clickable {
+                            locked = false
+                            lockHintVisible = false
+                            touchControls()
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(
+                        imageVector = Icons.Filled.LockOpen,
+                        contentDescription = stringResource(R.string.m_player_unlock),
+                        tint = Color.White,
+                        modifier = Modifier.size(24.dp),
                     )
                 }
             }

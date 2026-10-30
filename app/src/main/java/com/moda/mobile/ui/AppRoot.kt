@@ -833,16 +833,6 @@ private fun DetailRoute(vm: MainViewModel, dest: Dest.Detail) {
         detail = vm.detail,
         loading = vm.detailLoading,
         error = vm.detailError,
-        onPlay = { episode ->
-            vm.push(
-                Dest.Player(
-                    cid = dest.cid,
-                    vid = episode.vid,
-                    title = dest.title,
-                    episodeIndex = episode.index,
-                ),
-            )
-        },
         onTierSelect = vm::selectDetailTier,
         selectedTier = vm.detailTier,
         onBack = { vm.pop() },
@@ -949,6 +939,8 @@ private fun PlayerRoute(vm: MainViewModel) {
             episodes = state.episodes,
             currentEpisodeIndex = state.episodeIndex,
             onSelectEpisode = { episode -> vm.selectEpisodeFromPlayer(state.cid, episode) },
+            // 换集期间这一页不卸载：只在画面上叠一个"切换中"（见 MainViewModel.startPlayer）
+            switching = state.switching,
         )
     }
 }
