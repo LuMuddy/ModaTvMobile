@@ -3,8 +3,6 @@ package com.moda.mobile.ui
 import android.content.Context
 import android.content.pm.ActivityInfo
 import android.media.AudioManager
-import android.os.Build
-import android.provider.MediaStore
 import android.util.Log
 import android.view.SurfaceHolder
 import android.view.SurfaceView
@@ -132,7 +130,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
  * 控制层无操作自动隐藏。TV 端是 5 秒，手机端取 3 秒：
@@ -697,8 +694,12 @@ fun PlayerScreen(
 
     /**
      * 横屏 + 全屏（需求 5）。
-     * 申请与恢复必须成对：退出播放页时把方向还回 UNSPECIFIED、把系统栏放出来，
-     * 否则回到竖屏列表页会横着显示、且状态栏永远不出现。
+     * 申请与恢复必须成对：退出播放页时把方向还回 PORTRAIT、把系统栏放出来，
+     * 否则回到列表页会横着显示、且状态栏永远不出现。
+     *
+     * 恢复的目标是 PORTRAIT 而不是 UNSPECIFIED：清单里已经把主 Activity 锁成竖屏，
+     * 还回 UNSPECIFIED 等于把"跟随传感器"打开——平板上一退出播放页就转回横屏，
+     * 与清单的锁定正好相反。全应用只有这里和详情页全屏两处申请横屏。
      */
     DisposableEffect(activity) {
         val window = activity?.window
@@ -715,7 +716,7 @@ fun PlayerScreen(
         controller?.hide(WindowInsetsCompat.Type.systemBars())
         onDispose {
             controller?.show(WindowInsetsCompat.Type.systemBars())
-            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
             // 亮度只作用于本 Activity 的窗口：离开播放页必须还原成「跟随系统」，
             // 否则用户在播放页调暗过之后，整个 App 都停在那个人为亮度上。
             // -1f 就是 BRIGHTNESS_OVERRIDE_NONE（系统默认值）。

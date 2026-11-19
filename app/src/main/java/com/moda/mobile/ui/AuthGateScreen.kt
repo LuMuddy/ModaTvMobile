@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -95,6 +96,15 @@ private val QR_BOX = 240.dp
 
 /** 二维码区白底内边距。只作码不贴白框边缘的收边（静区 2 模块由 QrCode.kt 自己铺） */
 private val QR_PADDING = 8.dp
+
+/**
+ * 内容列的最大宽度。
+ *
+ * 这一屏的宽度只服务两样东西：240dp 的二维码和一行说明。手机上（360~430dp）它自动铺满，
+ * 没有变化；平板竖过来是 800dp，不封顶的话「刷新二维码」会变成一根 750dp 宽的长条，
+ * 文案也拉成一整行，用户要横着找「退出」在哪。480dp 是二维码加两侧留白的舒适宽度。
+ */
+private val GATE_CONTENT_MAX_WIDTH = 480.dp
 
 /**
  * 小写直接当大写显示：只改渲染、不动缓冲区，输入法合成区因此完全不受影响。
@@ -339,11 +349,16 @@ fun AuthGateScreen(
     // 这一屏又是唯一没有 Scaffold / 压栈页壳子的整屏页。少了它，最底下那排
     // 「刷新二维码 / 退出」正好压在导航栏与手势区上——点「退出」会被系统返回手势吞掉，
     // 屏幕纹丝不动，用户看到的就是「退出去了还是这个授权页」。压栈页是同款处理（见 AppRoot）。
-    Box(Modifier.fillMaxSize().background(ModaColors.Bg).safeDrawingPadding()) {
+    Box(
+        Modifier.fillMaxSize().background(ModaColors.Bg).safeDrawingPadding(),
+        // 封顶后剩下的两侧交给居中：竖屏平板上是一列居中的码，而不是一条横贯整屏的按钮
+        contentAlignment = Alignment.TopCenter,
+    ) {
         // 小屏（含折叠 / 横屏矮窗口）上内容一定超出屏幕，所以整屏可滚：
         // 底部那排按钮永远滚得到，不会被屏幕下沿裁掉
         Column(
             Modifier
+                .widthIn(max = GATE_CONTENT_MAX_WIDTH)
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 24.dp, vertical = 32.dp),

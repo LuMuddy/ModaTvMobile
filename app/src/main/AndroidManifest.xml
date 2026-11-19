@@ -37,13 +37,21 @@
         android:requestLegacyExternalStorage="true"
         android:theme="@style/Theme.Moda">
 
-        <!-- 主 Activity 不写 android:screenOrientation：竖屏是默认形态，
-             播放页由运行时（PlayerScreen）切横屏、退出时切回，写死在清单里就锁不回竖屏了。
+        <!-- 默认竖屏。整套界面都是按竖屏单列排的（首页 3 列海报、底栏三项、设置单列），
+             平板横过来只会把每一行都拉长，所以这一层直接锁 portrait。
+             播放页与详情页全屏是唯一的例外：由运行时（PlayerScreen / DetailPreviewPlayer）
+             申请 SENSOR_LANDSCAPE，退出时**显式**改回 PORTRAIT——不能再还回 UNSPECIFIED，
+             那样一退出播放页就会跟着平板的传感器转到横屏，与这里的锁定互相打架。
              configChanges 自行吞掉旋转/深色模式切换，避免旋转一次就重建 Activity
-             把正在播放的播放器、滚动位置一起丢掉。resizeableActivity 保持默认（true）。 -->
+             把正在播放的播放器、滚动位置一起丢掉。resizeableActivity 保持默认（true）：
+             锁的是方向，不是尺寸——分屏 / 自由窗口下窗口依旧可以被拖成任意比例。
+             ⚠️ targetSdk 升到 36 时这条会失效：Android 16 起系统会忽略大屏（≥600dp）上的
+             方向锁定。届时要么接受平板横屏（3 列会被拉成 420dp 一张，需要给页面补限宽），
+             要么把 targetSdk 停在 35 继续观察。 -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:screenOrientation="portrait"
             android:configChanges="orientation|screenSize|keyboardHidden|uiMode">
             <!-- 手机端只有桌面入口一个 -->
             <intent-filter>

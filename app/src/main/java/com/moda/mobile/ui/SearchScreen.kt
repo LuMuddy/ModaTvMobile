@@ -73,7 +73,10 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
-/** 手机竖屏 2 列，与首页同一档：搜索结果也是海报墙，卡宽一致才不会有"两套网格"的观感 */
+/**
+ * 固定 2 列，手机与平板同一套：搜索结果也是海报墙，与首页一样不按宽度另算列数。
+ * 一屏两条是手机上一眼能比较的下限，再密就只能靠标题认剧了。
+ */
 private const val RESULT_COLUMNS = 2
 
 /** 占位提示换词节奏：与参考实现一致，3.5 秒一条 */

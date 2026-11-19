@@ -67,6 +67,7 @@ import androidx.compose.ui.unit.dp
 import com.moda.mobile.R
 import com.moda.mobile.model.Tier
 import com.moda.mobile.model.TierName
+import com.moda.mobile.ui.components.PlayerSheetMaxWidth
 import com.moda.mobile.ui.theme.ModaColors
 import com.moda.mobile.ui.theme.ModaType
 import kotlin.math.roundToLong
@@ -224,8 +225,9 @@ fun PlayerSheet(
     ModalBottomSheet(
         onDismissRequest = onClose,
         sheetState = sheetState,
-        // Dp.Unspecified = 占满可用宽度：手机横屏下七个面板才会一样宽
-        sheetMaxWidth = Dp.Unspecified,
+        // 手机横屏（窄于 840dp）依然是占满可用宽度：七个面板一样宽靠的就是这同一个数。
+        // 封顶只是给平板用的——铺满 1280dp 的一整条面板，每一行都宽得不成比例。
+        sheetMaxWidth = PlayerSheetMaxWidth,
         containerColor = ModaColors.Surface,
         contentColor = ModaColors.Text,
     ) {

@@ -650,7 +650,9 @@ fun DetailPreviewPlayer(
         }
         onDispose {
             controller?.show(WindowInsetsCompat.Type.systemBars())
-            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+            // 回竖屏而不是 UNSPECIFIED：清单锁的是 portrait（播放页那一处同理），
+            // 还回"跟随传感器"会让平板一退出全屏就转回横屏
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         }
     }
 

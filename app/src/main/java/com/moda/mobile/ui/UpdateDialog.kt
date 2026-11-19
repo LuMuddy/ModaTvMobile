@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -31,6 +32,7 @@ import androidx.compose.ui.window.Dialog
 import com.moda.mobile.R
 import com.moda.mobile.model.AppError
 import com.moda.mobile.model.UpdateInfo
+import com.moda.mobile.ui.components.DialogMaxWidth
 import com.moda.mobile.ui.theme.ModaColors
 import com.moda.mobile.ui.theme.ModaType
 import com.moda.mobile.ui.update.UpdateInstaller
@@ -157,6 +159,9 @@ fun UpdateDialog(
     Dialog(onDismissRequest = onDismiss) {
         Column(
             Modifier
+                // Dialog 的默认窗口宽度按屏幕比例给，平板上会撑成一整片；先限宽再 fillMaxWidth，
+                // 手机（窗口本来就更窄）不受影响。顺序不能反，反了限宽就被 fillMaxWidth 吃掉了
+                .widthIn(max = DialogMaxWidth)
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(20.dp))
                 .background(ModaColors.Surface)

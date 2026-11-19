@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -23,6 +24,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.moda.mobile.BuildConfig
 import com.moda.mobile.R
+import com.moda.mobile.ui.components.DialogMaxWidth
 import com.moda.mobile.ui.theme.ModaColors
 import com.moda.mobile.ui.theme.ModaType
 
@@ -61,6 +63,8 @@ fun CopyrightNoticeDialog(
     Dialog(onDismissRequest = onDismiss) {
         Column(
             Modifier
+                // 同 UpdateDialog：Dialog 窗口在平板上会按屏幕比例放大，先在 420dp 封顶
+                .widthIn(max = DialogMaxWidth)
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(20.dp))
                 .background(ModaColors.Surface)
